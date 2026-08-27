@@ -58,3 +58,29 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_dual_ng01_mujoco.py --in
 ```bash
 PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
 ```
+
+# FR3C 单臂遥操（MuJoCo 仿真）
+
+资产生成（一次性）：
+`ash
+cd /home/u22/kyz/pico_software
+XRoboToolkit-Teleop-Sample-Python/.venv/bin/python fr3c_assets/build_fr3c_assets.py
+`
+
+假输入测试（无头，推荐先跑）：
+`ash
+cd XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake --headless-duration 10
+`
+
+完整位姿控制：
+`ash
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake --control-mode pose
+`
+
+连接真实 PICO（先启动 XRoboToolkit PC Service）：
+`ash
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source pico
+`
+
+操作：按住右侧 GRIP 接管机械臂（标记变橙），按 B 回 home；扳机留给后续夹爪。

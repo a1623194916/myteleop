@@ -1,0 +1,43 @@
+<mujoco model="fr3c teleop scene">
+  <include file="fr3c_robot.xml"/>
+
+  <statistic center="0.25 0 0.35" extent="0.9" meansize="0.08"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0 0 0"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"
+      mark="cross" markrgb=".8 .8 .8"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" directional="true"/>
+    <geom name="floor" size="1 1 0.01" type="plane" material="grid"/>
+    <body name="right_target" pos="0.35 -0.25 0.45" mocap="true">
+      <geom name="right_target_x_shaft" type="cylinder" size="0.005 0.05" pos="0.05 0 0" zaxis="1 0 0" rgba="1 0 0 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="right_target_y_shaft" type="cylinder" size="0.005 0.05" pos="0 0.05 0" zaxis="0 1 0" rgba="0 1 0 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="right_target_z_shaft" type="cylinder" size="0.005 0.05" pos="0 0 0.05" zaxis="0 0 1" rgba="0 0 1 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="right_target_geom" type="sphere" size="0.02" rgba="0.2 0.9 0.3 0.5" contype="0" conaffinity="0" group="1"/>
+    </body>
+    <geom name="world_x_shaft" type="cylinder" size="0.01 0.1" pos="0.1 0 0.0" zaxis="1 0 0" rgba="1 0 0 1" contype="0" conaffinity="0" group="1"/>
+    <geom name="world_y_shaft" type="cylinder" size="0.01 0.1" pos="0 0.1 0.0" zaxis="0 1 0" rgba="0 1 0 1" contype="0" conaffinity="0" group="1"/>
+    <geom name="world_z_shaft" type="cylinder" size="0.01 0.2" pos="0 0 0.2" zaxis="0 0 1" rgba="0 0 1 1" contype="0" conaffinity="0" group="1"/>
+  </worldbody>
+
+  <actuator>
+    <position name="j1_servo" joint="j1" kp="100" kv="5"/>
+    <position name="j2_servo" joint="j2" kp="300" kv="12"/>
+    <position name="j3_servo" joint="j3" kp="200" kv="10"/>
+    <position name="j4_servo" joint="j4" kp="80" kv="4"/>
+    <position name="j5_servo" joint="j5" kp="50" kv="2"/>
+    <position name="j6_servo" joint="j6" kp="30" kv="2"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home" qpos="0 -1.5708 0.9 -1.2 1.5708 0" ctrl="0 -1.5708 0.9 -1.2 1.5708 0"/>
+  </keyframe>
+</mujoco>
