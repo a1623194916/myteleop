@@ -112,7 +112,10 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --in
 ```bash
 cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 export DISPLAY=:1
-PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.22
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.22 \
+--position-deadband-mm 5.0 \
+--rotation-deadband-deg 1.0 \
+--input-smooth-alpha 0.2
 ```
 
 真机模式默认同时打开 MuJoCo 窗口，窗口显示真机实测关节状态。无显示环境可加 `--no-visualize-mujoco`。

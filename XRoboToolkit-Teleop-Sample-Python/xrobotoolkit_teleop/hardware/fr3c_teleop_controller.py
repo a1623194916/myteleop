@@ -19,6 +19,7 @@ from placo_utils.visualization import robot_frame_viz, robot_viz
 from xrobotoolkit_teleop.common.xr_client import XrClient
 from xrobotoolkit_teleop.hardware.fr3c_control_utils import (
     JointCommandTrajectory,
+    PoseDeltaFilter,
     resolve_controller_side,
 )
 from xrobotoolkit_teleop.utils.geometry import (
@@ -48,6 +49,9 @@ class Fr3cTeleopController:
         smooth_alpha: float = 0.35,
         max_joint_step_deg: float = 1.0,
         controller_side: str = "auto",
+        input_smooth_alpha: float = 0.25,
+        position_deadband_mm: float = 1.5,
+        rotation_deadband_deg: float = 0.5,
     ):
         from xrobotoolkit_teleop.hardware.interface.fr3c import Fr3cController
 
@@ -87,6 +91,7 @@ class Fr3cTeleopController:
         self.init_ee_quat = {}
         self.init_controller_xyz = {}
         self.init_controller_quat = {}
+        self.input_pose_filter = {}
         for name, config in self.manipulator_config.items():
             initial_pose = np.eye(4)
             self.effector_task[name] = self.solver.add_frame_task(config["link_name"], initial_pose)
@@ -97,6 +102,17 @@ class Fr3cTeleopController:
             self.init_ee_quat[name] = None
             self.init_controller_xyz[name] = None
             self.init_controller_quat[name] = None
+            self.input_pose_filter[name] = PoseDeltaFilter(
+                alpha=input_smooth_alpha,
+                position_deadband_m=position_deadband_mm / 1000.0,
+                rotation_deadband_rad=np.deg2rad(rotation_deadband_deg),
+            )
+
+        print(
+            "XR input filter: "
+            f"alpha={input_smooth_alpha}, position_deadband={position_deadband_mm} mm, "
+            f"rotation_deadband={rotation_deadband_deg} deg"
+        )
 
         # Measured joints initialize the command once. During ServoJ streaming,
         # Placo advances from the last command to avoid delayed feedback.
@@ -141,11 +157,17 @@ class Fr3cTeleopController:
         if self.init_controller_xyz[arm_name] is None:
             self.init_controller_xyz[arm_name] = controller_xyz.copy()
             self.init_controller_quat[arm_name] = controller_quat.copy()
+            self.input_pose_filter[arm_name].reset()
             return np.zeros(3), np.zeros(3)
 
-        delta_xyz = (controller_xyz - self.init_controller_xyz[arm_name]) * self.scale_factor
+        delta_xyz = controller_xyz - self.init_controller_xyz[arm_name]
         delta_rot = quat_diff_as_angle_axis(self.init_controller_quat[arm_name], controller_quat)
-        return delta_xyz, delta_rot
+        delta_xyz, delta_rot = self.input_pose_filter[arm_name].update(
+            delta_xyz,
+            delta_rot,
+            timestamp_ns=self.xr_client.get_timestamp_ns(),
+        )
+        return delta_xyz * self.scale_factor, delta_rot
 
     def calc_target_joint_position(self):
         with self._state_lock:
@@ -181,6 +203,7 @@ class Fr3cTeleopController:
                     self.init_ee_quat[arm_name] = None
                     self.init_controller_xyz[arm_name] = None
                     self.init_controller_quat[arm_name] = None
+                    self.input_pose_filter[arm_name].reset()
                     T_world_ee = self.placo_robot.get_T_world_frame(config["link_name"])
                     self.effector_task[arm_name].T_world_frame = T_world_ee
 

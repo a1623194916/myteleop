@@ -19,6 +19,77 @@ def resolve_controller_side(robot_ip: str, requested_side: str) -> str:
     return side
 
 
+class PoseDeltaFilter:
+    """Low-pass XR pose deltas and apply continuous radial deadbands."""
+
+    def __init__(
+        self,
+        alpha: float,
+        position_deadband_m: float,
+        rotation_deadband_rad: float,
+    ):
+        if not 0.0 < alpha <= 1.0:
+            raise ValueError("alpha must be in (0, 1]")
+        if position_deadband_m < 0.0:
+            raise ValueError("position_deadband_m must be non-negative")
+        if rotation_deadband_rad < 0.0:
+            raise ValueError("rotation_deadband_rad must be non-negative")
+        self.alpha = float(alpha)
+        self.position_deadband_m = float(position_deadband_m)
+        self.rotation_deadband_rad = float(rotation_deadband_rad)
+        self.reset()
+
+    def reset(self):
+        self._filtered_position = np.zeros(3)
+        self._filtered_rotation = np.zeros(3)
+        self._output_position = np.zeros(3)
+        self._output_rotation = np.zeros(3)
+        self._last_timestamp_ns: int | None = None
+
+    @staticmethod
+    def _validate_delta(delta: np.ndarray, name: str) -> np.ndarray:
+        value = np.asarray(delta, dtype=float)
+        if value.shape != (3,):
+            raise ValueError(f"{name} must have shape (3,), got {value.shape}")
+        return value
+
+    @staticmethod
+    def _apply_soft_deadband(value: np.ndarray, radius: float) -> np.ndarray:
+        magnitude = np.linalg.norm(value)
+        if magnitude <= radius:
+            return np.zeros_like(value)
+        return value * ((magnitude - radius) / magnitude)
+
+    def update(
+        self,
+        position_delta: np.ndarray,
+        rotation_delta: np.ndarray,
+        timestamp_ns: int | None = None,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        position = self._validate_delta(position_delta, "position_delta")
+        rotation = self._validate_delta(rotation_delta, "rotation_delta")
+
+        has_timestamp = timestamp_ns is not None and timestamp_ns > 0
+        if has_timestamp and timestamp_ns == self._last_timestamp_ns:
+            return self._output_position.copy(), self._output_rotation.copy()
+        if has_timestamp:
+            self._last_timestamp_ns = timestamp_ns
+
+        self._filtered_position += self.alpha * (position - self._filtered_position)
+        self._filtered_rotation += self.alpha * (rotation - self._filtered_rotation)
+
+        self._output_position = self._apply_soft_deadband(
+            self._filtered_position,
+            self.position_deadband_m,
+        )
+        self._output_rotation = self._apply_soft_deadband(
+            self._filtered_rotation,
+            self.rotation_deadband_rad,
+        )
+
+        return self._output_position.copy(), self._output_rotation.copy()
+
+
 class JointCommandTrajectory:
     """Advance a bounded command trajectory without measured-state feedback."""
 

@@ -29,6 +29,9 @@ def main(
     smooth_alpha: float = 0.35,
     max_joint_step_deg: float = 1.0,
     controller_side: str = "auto",
+    input_smooth_alpha: float = 0.25,
+    position_deadband_mm: float = 1.5,
+    rotation_deadband_deg: float = 0.5,
     reset: bool = False,
     visualize_mujoco: bool = True,
     visualize_placo: bool = False,
@@ -49,6 +52,11 @@ def main(
             joint speed (default 1 deg/tick at cmd_t=0.01 -> 100 deg/s).
         controller_side: "auto", "left", or "right". Auto maps robot IP
             192.168.5.22 to left and 192.168.5.23 to right.
+        input_smooth_alpha: Low-pass factor applied to new XR samples.
+        position_deadband_mm: Accumulated controller translation required
+            before updating the IK target, in millimeters.
+        rotation_deadband_deg: Accumulated controller rotation required before
+            updating the IK target, in degrees.
         visualize_mujoco: Show a MuJoCo mirror of measured hardware joints.
         visualize_placo: Open the MeshCat Placo visualization in a browser.
     """
@@ -69,6 +77,9 @@ def main(
         smooth_alpha=smooth_alpha,
         max_joint_step_deg=max_joint_step_deg,
         controller_side=controller_side,
+        input_smooth_alpha=input_smooth_alpha,
+        position_deadband_mm=position_deadband_mm,
+        rotation_deadband_deg=rotation_deadband_deg,
     )
 
     import threading
