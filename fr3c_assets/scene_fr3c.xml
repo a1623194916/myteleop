@@ -1,6 +1,8 @@
 <mujoco model="fr3c teleop scene">
   <include file="fr3c_robot.xml"/>
 
+  <option integrator="implicitfast"/>
+
   <statistic center="0.25 0 0.35" extent="0.9" meansize="0.08"/>
 
   <visual>
@@ -29,15 +31,15 @@
   </worldbody>
 
   <actuator>
-    <position name="j1_servo" joint="j1" kp="100" kv="5"/>
-    <position name="j2_servo" joint="j2" kp="300" kv="12"/>
-    <position name="j3_servo" joint="j3" kp="200" kv="10"/>
-    <position name="j4_servo" joint="j4" kp="80" kv="4"/>
-    <position name="j5_servo" joint="j5" kp="50" kv="2"/>
-    <position name="j6_servo" joint="j6" kp="30" kv="2"/>
+    <position name="j1_servo" joint="j1" kp="600" kv="30"/>
+    <position name="j2_servo" joint="j2" kp="1600" kv="80"/>
+    <position name="j3_servo" joint="j3" kp="800" kv="40"/>
+    <position name="j4_servo" joint="j4" kp="250" kv="12"/>
+    <position name="j5_servo" joint="j5" kp="150" kv="8"/>
+    <position name="j6_servo" joint="j6" kp="80" kv="4"/>
   </actuator>
 
   <keyframe>
-    <key name="home" qpos="0 -1.5708 0.9 -1.2 1.5708 0" ctrl="0 -1.5708 0.9 -1.2 1.5708 0"/>
+    <key name="home" qpos="0 -1.5708 0.9 -0.9 4.712 0" ctrl="0 -1.5708 0.9 -0.9 4.712 0"/>
   </keyframe>
 </mujoco>

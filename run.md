@@ -37,6 +37,7 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-s
 ## 连接真实 PICO（先启动 XRoboToolkit PC Service 并连接 PICO）
 
 ```bash
+export DISPLAY=:1
 PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source pico
 ```
 
