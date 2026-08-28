@@ -112,7 +112,7 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --in
 ```bash
 cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 export DISPLAY=:1
-PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.23 --visualize-placo
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.22
 ```
 
 可选参数：`--reset`（先 MoveJ 到初始位姿，默认与仿真 home 一致的工具朝下位姿，`--initial-joints-deg 0 -90 51.57 -51.57 270 0` 可改）、`--cmd-t 0.01`（ServoJ 周期）、`--scale-factor 1.0`、`--visualize-placo`（浏览器看 IK）。

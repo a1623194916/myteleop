@@ -42,6 +42,8 @@ class Fr3cTeleopController:
         q_slice: tuple = (7, 13),
         R_headset_world: np.ndarray = R_HEADSET_TO_WORLD,
         visualize_placo: bool = False,
+        smooth_alpha: float = 0.35,
+        max_joint_step_deg: float = 1.0,
     ):
         from xrobotoolkit_teleop.hardware.interface.fr3c import Fr3cController
 
@@ -52,6 +54,10 @@ class Fr3cTeleopController:
         self.visualize_placo = visualize_placo
         self.initial_joint_rad = np.deg2rad(np.asarray(initial_joint_deg, dtype=float))
         self.q_lo, self.q_hi = q_slice
+        # Servo-stream smoothing: exponential blend toward the IK target plus
+        # a hard per-tick slew cap (rad per cmd_t) that bounds joint velocity.
+        self.smooth_alpha = smooth_alpha
+        self.max_joint_step = np.deg2rad(max_joint_step_deg)
 
         self.arm_name = "right_arm"
         self.manipulator_config = {
@@ -189,8 +195,14 @@ class Fr3cTeleopController:
     def run_arm_thread(self, stop_event: threading.Event):
         print("Starting arm servo thread...")
         self.robot.start_servo()
+        q_cmd = self.robot.get_current_joint_positions()
         while not stop_event.is_set():
-            self.robot.servo_joints(self.target_q)
+            # Exponential smoothing toward the IK target, with the step
+            # clipped to a per-tick slew cap that bounds joint velocity.
+            step = self.smooth_alpha * (self.target_q - q_cmd)
+            step = np.clip(step, -self.max_joint_step, self.max_joint_step)
+            q_cmd = q_cmd + step
+            self.robot.servo_joints(q_cmd)
             if self.robot.servo_stream_dead:
                 print("Servo stream dead (persistent errors). Stopping arm thread.")
                 break

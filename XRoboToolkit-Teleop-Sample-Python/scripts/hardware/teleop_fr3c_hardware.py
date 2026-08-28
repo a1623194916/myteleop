@@ -25,6 +25,8 @@ def main(
     initial_joints_deg: list[float] = DEFAULT_INITIAL_JOINT_DEG,
     scale_factor: float = 1.0,
     cmd_t: float = 0.01,
+    smooth_alpha: float = 0.35,
+    max_joint_step_deg: float = 1.0,
     reset: bool = False,
     visualize_placo: bool = False,
 ):
@@ -38,6 +40,10 @@ def main(
         reset: Move the arm to --initial-joints-degree before starting.
         scale_factor: Controller motion gain (1.0 = 1:1).
         cmd_t: ServoJ command period in seconds (0.008 - 0.016 recommended).
+        smooth_alpha: Target smoothing factor per servo tick (0..1). Lower =
+            smoother but laggier; raise if the arm feels too sluggish.
+        max_joint_step_deg: Hard joint-step cap per servo tick (deg). Bounds
+            joint speed (default 1 deg/tick at cmd_t=0.01 -> 100 deg/s).
         visualize_placo: Open the MeshCat Placo visualization in a browser.
     """
     from xrobotoolkit_teleop.common.xr_client import XrClient
@@ -54,6 +60,8 @@ def main(
         scale_factor=scale_factor,
         cmd_t=cmd_t,
         visualize_placo=visualize_placo,
+        smooth_alpha=smooth_alpha,
+        max_joint_step_deg=max_joint_step_deg,
     )
 
     import threading
