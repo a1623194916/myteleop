@@ -121,6 +121,60 @@ class Fr3cController:
             time.sleep(0.1)
         raise TimeoutError("FR3C did not reach the initial pose in time")
 
+    def activate_gripper(
+        self,
+        index: int = 1,
+        reset_delay: float = 1.0,
+        activation_delay: float = 2.0,
+    ):
+        """Reset and activate an already configured Fairino gripper."""
+        if index <= 0:
+            raise ValueError("gripper index must be positive")
+        if reset_delay < 0.0 or activation_delay < 0.0:
+            raise ValueError("gripper activation delays must be non-negative")
+
+        err = self.robot.ActGripper(index, 0)
+        if err != 0:
+            raise RuntimeError(f"ActGripper reset failed, error code {err}")
+        time.sleep(reset_delay)
+        err = self.robot.ActGripper(index, 1)
+        if err != 0:
+            raise RuntimeError(f"ActGripper activation failed, error code {err}")
+        time.sleep(activation_delay)
+
+    def move_gripper(
+        self,
+        position_percent: float,
+        index: int = 1,
+        velocity: int = 20,
+        force: int = 20,
+        max_time_ms: int = 1000,
+    ) -> int:
+        """Send one nonblocking target to a configured parallel gripper."""
+        if not 0.0 <= position_percent <= 100.0:
+            raise ValueError("position_percent must be in [0, 100]")
+        for name, value in (("velocity", velocity), ("force", force)):
+            if not 0 <= value <= 100:
+                raise ValueError(f"{name} must be in [0, 100]")
+        if not 0 <= max_time_ms <= 30000:
+            raise ValueError("max_time_ms must be in [0, 30000]")
+
+        err = self.robot.MoveGripper(
+            int(index),
+            int(round(position_percent)),
+            int(velocity),
+            int(force),
+            int(max_time_ms),
+            1,
+            0,
+            0.0,
+            0,
+            0,
+        )
+        if err != 0:
+            raise RuntimeError(f"MoveGripper failed, error code {err}")
+        return err
+
     def start_servo(self):
         if self._servo_active:
             return
