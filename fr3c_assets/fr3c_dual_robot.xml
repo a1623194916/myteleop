@@ -1,0 +1,87 @@
+<mujoco model="fr3c_dual">
+  <compiler angle="radian" />
+  <asset>
+    <mesh name="left_base_link" content_type="model/stl" file="fr3c_stl/base_link.STL" />
+    <mesh name="left_shoulder_Link" content_type="model/stl" file="fr3c_stl/shoulder_Link.STL" />
+    <mesh name="left_upperarm_Link" content_type="model/stl" file="fr3c_stl/upperarm_Link.STL" />
+    <mesh name="left_forearm_Link" content_type="model/stl" file="fr3c_stl/forearm_Link.STL" />
+    <mesh name="left_wrist1_Link" content_type="model/stl" file="fr3c_stl/wrist1_Link.STL" />
+    <mesh name="left_wrist2_Link" content_type="model/stl" file="fr3c_stl/wrist2_Link.STL" />
+    <mesh name="left_wrist3_Link" content_type="model/stl" file="fr3c_stl/wrist3_Link.STL" />
+    <mesh name="right_base_link" content_type="model/stl" file="fr3c_stl/base_link.STL" />
+    <mesh name="right_shoulder_Link" content_type="model/stl" file="fr3c_stl/shoulder_Link.STL" />
+    <mesh name="right_upperarm_Link" content_type="model/stl" file="fr3c_stl/upperarm_Link.STL" />
+    <mesh name="right_forearm_Link" content_type="model/stl" file="fr3c_stl/forearm_Link.STL" />
+    <mesh name="right_wrist1_Link" content_type="model/stl" file="fr3c_stl/wrist1_Link.STL" />
+    <mesh name="right_wrist2_Link" content_type="model/stl" file="fr3c_stl/wrist2_Link.STL" />
+    <mesh name="right_wrist3_Link" content_type="model/stl" file="fr3c_stl/wrist3_Link.STL" />
+  </asset>
+  <worldbody>
+    <body name="left_robot_base" pos="0 0.275 0" quat="0 0 0 1">
+      <geom type="mesh" mesh="left_base_link" />
+      <body name="left_shoulder_Link">
+        <inertial pos="-0.00016 -0.01399 0.00153" quat="0.64577 0.615434 -0.306567 0.332024" mass="1.69" diaginertia="0.00231646 0.00229487 0.00172046" />
+        <joint name="left_j1" range="-3.0543 3.0543" actuatorfrcrange="-110 110" />
+        <geom type="mesh" mesh="left_shoulder_Link" />
+        <body name="left_upperarm_Link" pos="0 0 0.14" quat="0.707105 0.707108 0 0">
+          <inertial pos="0.14 0 0.10134" quat="0.500202 0.500223 0.499777 0.499797" mass="3.73" diaginertia="0.0712043 0.0699819 0.00529681" />
+          <joint name="left_j2" range="-4.6251 1.4835" actuatorfrcrange="-110 110" />
+          <geom type="mesh" mesh="left_upperarm_Link" />
+          <body name="left_forearm_Link" pos="-0.28 0 3.3292e-05">
+            <inertial pos="0.06324 8e-05 0.01104" quat="0.499338 0.500744 0.499509 0.500407" mass="1.84" diaginertia="0.0176463 0.0173203 0.00224646" />
+            <joint name="left_j3" range="-2.618 2.618" actuatorfrcrange="-110 110" />
+            <geom type="mesh" mesh="left_forearm_Link" />
+            <body name="left_wrist1_Link" pos="-0.24 0 2.7002e-05">
+              <inertial pos="0.0001 -0.00203 0.01255" quat="0.994945 -0.0425517 0.000205706 -0.0909613" mass="1.2" diaginertia="0.00131852 0.00130525 0.000989315" />
+              <joint name="left_j4" range="-4.6251 1.4835" actuatorfrcrange="-63 63" />
+              <geom type="mesh" mesh="left_wrist1_Link" />
+              <body name="left_wrist2_Link" pos="1.1476e-05 0 0.102" quat="0.707105 0.707108 0 0">
+                <inertial pos="-0.0001 0.00203 0.01255" quat="0.994945 0.0425517 -0.000205706 -0.0909613" mass="1.2" diaginertia="0.00131852 0.00130525 0.000989315" />
+                <joint name="left_j5" range="0 6.2657" actuatorfrcrange="-63 63" />
+                <geom type="mesh" mesh="left_wrist2_Link" />
+                <body name="left_wrist3_Link" pos="1.1255e-05 0.1 0.102" quat="0.707105 -0.707108 0 0">
+                  <inertial pos="-0.00148 -0.00154 -0.0179" quat="0.345355 0.618082 -0.341703 0.618015" mass="0.53" diaginertia="0.000534945 0.000336938 0.000334356" />
+                  <joint name="left_j6" range="-3.0543 3.0543" actuatorfrcrange="-63 63" />
+                  <geom type="mesh" mesh="left_wrist3_Link" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+    <body name="right_robot_base" pos="0 -0.275 0" quat="0 0 0 1">
+      <geom type="mesh" mesh="right_base_link" />
+      <body name="right_shoulder_Link">
+        <inertial pos="-0.00016 -0.01399 0.00153" quat="0.64577 0.615434 -0.306567 0.332024" mass="1.69" diaginertia="0.00231646 0.00229487 0.00172046" />
+        <joint name="right_j1" range="-3.0543 3.0543" actuatorfrcrange="-110 110" />
+        <geom type="mesh" mesh="right_shoulder_Link" />
+        <body name="right_upperarm_Link" pos="0 0 0.14" quat="0.707105 0.707108 0 0">
+          <inertial pos="0.14 0 0.10134" quat="0.500202 0.500223 0.499777 0.499797" mass="3.73" diaginertia="0.0712043 0.0699819 0.00529681" />
+          <joint name="right_j2" range="-4.6251 1.4835" actuatorfrcrange="-110 110" />
+          <geom type="mesh" mesh="right_upperarm_Link" />
+          <body name="right_forearm_Link" pos="-0.28 0 3.3292e-05">
+            <inertial pos="0.06324 8e-05 0.01104" quat="0.499338 0.500744 0.499509 0.500407" mass="1.84" diaginertia="0.0176463 0.0173203 0.00224646" />
+            <joint name="right_j3" range="-2.618 2.618" actuatorfrcrange="-110 110" />
+            <geom type="mesh" mesh="right_forearm_Link" />
+            <body name="right_wrist1_Link" pos="-0.24 0 2.7002e-05">
+              <inertial pos="0.0001 -0.00203 0.01255" quat="0.994945 -0.0425517 0.000205706 -0.0909613" mass="1.2" diaginertia="0.00131852 0.00130525 0.000989315" />
+              <joint name="right_j4" range="-4.6251 1.4835" actuatorfrcrange="-63 63" />
+              <geom type="mesh" mesh="right_wrist1_Link" />
+              <body name="right_wrist2_Link" pos="1.1476e-05 0 0.102" quat="0.707105 0.707108 0 0">
+                <inertial pos="-0.0001 0.00203 0.01255" quat="0.994945 0.0425517 -0.000205706 -0.0909613" mass="1.2" diaginertia="0.00131852 0.00130525 0.000989315" />
+                <joint name="right_j5" range="0 6.2657" actuatorfrcrange="-63 63" />
+                <geom type="mesh" mesh="right_wrist2_Link" />
+                <body name="right_wrist3_Link" pos="1.1255e-05 0.1 0.102" quat="0.707105 -0.707108 0 0">
+                  <inertial pos="-0.00148 -0.00154 -0.0179" quat="0.345355 0.618082 -0.341703 0.618015" mass="0.53" diaginertia="0.000534945 0.000336938 0.000334356" />
+                  <joint name="right_j6" range="-3.0543 3.0543" actuatorfrcrange="-63 63" />
+                  <geom type="mesh" mesh="right_wrist3_Link" />
+                </body>
+              </body>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>

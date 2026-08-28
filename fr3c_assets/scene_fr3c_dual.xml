@@ -1,0 +1,59 @@
+<mujoco model="fr3c dual teleop scene">
+  <include file="fr3c_dual_robot.xml"/>
+
+  <option integrator="implicitfast"/>
+
+  <statistic center="0.35 0 0.35" extent="1.0" meansize="0.08"/>
+
+  <visual>
+    <headlight diffuse="0.6 0.6 0.6" ambient="0.1 0.1 0.1" specular="0 0 0"/>
+    <global azimuth="120" elevation="-20"/>
+  </visual>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1=".2 .3 .4" rgb2=".1 0.15 0.2" width="512" height="512"
+      mark="cross" markrgb=".8 .8 .8"/>
+    <material name="grid" texture="grid" texrepeat="1 1" texuniform="true"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 1.5" directional="true"/>
+    <geom name="floor" size="1 1 0.01" type="plane" material="grid"/>
+    <body name="right_target" pos="0.35 -0.25 0.45" mocap="true">
+      <geom name="right_target_x_shaft" type="cylinder" size="0.005 0.05" pos="0.05 0 0" zaxis="1 0 0" rgba="1 0 0 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="right_target_y_shaft" type="cylinder" size="0.005 0.05" pos="0 0.05 0" zaxis="0 1 0" rgba="0 1 0 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="right_target_z_shaft" type="cylinder" size="0.005 0.05" pos="0 0 0.05" zaxis="0 0 1" rgba="0 0 1 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="right_target_geom" type="sphere" size="0.02" rgba="0.2 0.9 0.3 0.5" contype="0" conaffinity="0" group="1"/>
+    </body>
+    <body name="left_target" pos="0.35 0.25 0.45" mocap="true">
+      <geom name="left_target_x_shaft" type="cylinder" size="0.005 0.05" pos="0.05 0 0" zaxis="1 0 0" rgba="1 0 0 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="left_target_y_shaft" type="cylinder" size="0.005 0.05" pos="0 0.05 0" zaxis="0 1 0" rgba="0 1 0 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="left_target_z_shaft" type="cylinder" size="0.005 0.05" pos="0 0 0.05" zaxis="0 0 1" rgba="0 0 1 1" contype="0" conaffinity="0" group="1"/>
+      <geom name="left_target_geom" type="sphere" size="0.02" rgba="0.2 0.9 0.3 0.5" contype="0" conaffinity="0" group="1"/>
+    </body>
+    <geom name="world_x_shaft" type="cylinder" size="0.01 0.1" pos="0.1 0 0.0" zaxis="1 0 0" rgba="1 0 0 1" contype="0" conaffinity="0" group="1"/>
+    <geom name="world_y_shaft" type="cylinder" size="0.01 0.1" pos="0 0.1 0.0" zaxis="0 1 0" rgba="0 1 0 1" contype="0" conaffinity="0" group="1"/>
+    <geom name="world_z_shaft" type="cylinder" size="0.01 0.2" pos="0 0 0.2" zaxis="0 0 1" rgba="0 0 1 1" contype="0" conaffinity="0" group="1"/>
+  </worldbody>
+
+  <actuator>
+    <position name="left_j1_servo" joint="left_j1" kp="600" kv="30"/>
+    <position name="left_j2_servo" joint="left_j2" kp="1600" kv="80"/>
+    <position name="left_j3_servo" joint="left_j3" kp="800" kv="40"/>
+    <position name="left_j4_servo" joint="left_j4" kp="250" kv="12"/>
+    <position name="left_j5_servo" joint="left_j5" kp="150" kv="8"/>
+    <position name="left_j6_servo" joint="left_j6" kp="80" kv="4"/>
+    <position name="right_j1_servo" joint="right_j1" kp="600" kv="30"/>
+    <position name="right_j2_servo" joint="right_j2" kp="1600" kv="80"/>
+    <position name="right_j3_servo" joint="right_j3" kp="800" kv="40"/>
+    <position name="right_j4_servo" joint="right_j4" kp="250" kv="12"/>
+    <position name="right_j5_servo" joint="right_j5" kp="150" kv="8"/>
+    <position name="right_j6_servo" joint="right_j6" kp="80" kv="4"/>
+  </actuator>
+
+  <keyframe>
+    <key name="home"
+      qpos="0 -1.5708 0.9 -0.9 4.712 0  0 -1.5708 0.9 -0.9 4.712 0"
+      ctrl="0 -1.5708 0.9 -0.9 4.712 0  0 -1.5708 0.9 -0.9 4.712 0"/>
+  </keyframe>
+</mujoco>
