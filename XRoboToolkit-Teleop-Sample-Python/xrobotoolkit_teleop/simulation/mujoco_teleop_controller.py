@@ -28,10 +28,12 @@ class MujocoTeleopController(BaseTeleopController):
         scale_factor=1.0,
         dt=0.01,
         mj_qpos_init=None,
+        viewer_camera=None,
     ):
         self.visualize_placo = visualize_placo
         self.xml_path = xml_path
         self.mj_qpos_init = mj_qpos_init
+        self.viewer_camera = viewer_camera
 
         # To be initialized later
         self.mj_model = None
@@ -145,11 +147,13 @@ class MujocoTeleopController(BaseTeleopController):
 
     def run(self):
         with mj_viewer.launch_passive(self.mj_model, self.mj_data) as viewer:
-            # Set up viewer camera
-            viewer.cam.azimuth = 0
-            viewer.cam.elevation = -50
-            viewer.cam.distance = 2.0
-            viewer.cam.lookat = [0.2, 0, 0]
+            # Set up viewer camera (script can override for scenes whose scale
+            # differs from the tabletop default)
+            camera = self.viewer_camera or {}
+            viewer.cam.azimuth = camera.get("azimuth", 0)
+            viewer.cam.elevation = camera.get("elevation", -50)
+            viewer.cam.distance = camera.get("distance", 2.0)
+            viewer.cam.lookat = camera.get("lookat", [0.2, 0, 0])
 
             while not self._stop_event.is_set():
                 try:

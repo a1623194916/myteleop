@@ -129,3 +129,41 @@ PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-i
 - 按住自动选择或显式指定手柄的 GRIP 接管，末端跟随手柄 delta 位姿；松开保持不动。
 - 伺服错误码 14（速度超限）会自动加大 cmdT 降速；连续错误会自动结束伺服会话。
 - 启动后立即可以急停：Ctrl+C 会 ServoMoveEnd + 断链。
+
+# NG01 双臂遥操（MuJoCo 仿真，可行性验证）
+
+轮式人形 NG01（双 7-DOF 臂 + 升降柱 + 双夹爪），模型直接用 `NG01_v4/NG01_mjcf/NG01_teleop.xml` + `NG01_v4/urdf/NG01_teleop.urdf`，无需生成资产。脚本与 FR3C 双臂仿真同一范式：GRIP 接管对应侧手臂，末端跟随手柄 delta 位姿；扳机控制该侧夹爪（0–1.0472 rad）；升降柱通过关节正则化保持在 home 高度。
+
+## 假输入无头测试（推荐先跑）
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_ng01_dual_mujoco.py --input-source fake --headless-duration 10
+```
+
+fake 输入会让双手柄小幅摆动、左右夹爪每 2 秒交替开合，用于无头显验证 IK 与夹爪链路。
+
+## 单元测试
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+.venv/bin/python -m unittest discover tests
+```
+
+覆盖：MJCF 模型完整性（17 关节/mocap 目标球/home keyframe 千步稳定）、MJCF↔URDF 运动学映射（往返零误差、TCP 一致）、入口脚本（配置、夹爪扳机映射、fake 输入步进）。
+
+## 带可视化窗口运行
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_ng01_dual_mujoco.py --input-source fake
+```
+
+连真实 PICO 同理，把 `--input-source fake` 换成 `pico`（先启动 XRoboToolkit PC Service 并连接 PICO）。
+
+## 操作方式
+
+- 绿色球 = 左右手 home 位姿（mocap 目标），按住任一手柄 GRIP 接管对应侧手臂，球随 IK 目标移动。
+- 松开 GRIP 手臂停在当前位置；食指扳机线性控制该侧夹爪开合。
+- 升降柱当前固定在 home 高度（仿真验证阶段不遥操升降，后续接入硬件时按 R1 Lite 模式用摇杆/按键控制）。
