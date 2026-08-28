@@ -115,10 +115,14 @@ export DISPLAY=:1
 PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.22
 ```
 
-可选参数：`--reset`（先 MoveJ 到初始位姿，默认与仿真 home 一致的工具朝下位姿，`--initial-joints-deg 0 -90 51.57 -51.57 270 0` 可改）、`--cmd-t 0.01`（ServoJ 周期）、`--scale-factor 1.0`、`--visualize-placo`（浏览器看 IK）。
+真机模式默认同时打开 MuJoCo 窗口，窗口显示真机实测关节状态。无显示环境可加 `--no-visualize-mujoco`。
+
+手柄默认按机器人 IP 自动选择：`192.168.5.22` 使用左手柄，`192.168.5.23` 使用右手柄。可用 `--controller-side left` 或 `--controller-side right` 强制覆盖。
+
+可选参数：`--reset`（先 MoveJ 到初始位姿，默认与仿真 home 一致的工具朝下位姿，`--initial-joints-deg 0 -90 51.57 -51.57 270 0` 可改）、`--cmd-t 0.01`（ServoJ 周期）、`--scale-factor 1.0`、`--smooth-alpha 0.35`（命令轨迹平滑）、`--max-joint-step-deg 1.0`（每周期关节步长上限）、`--no-visualize-mujoco`（关闭真机镜像窗口）、`--visualize-placo`（浏览器看 IK）。
 
 ## 操作方式与安全
 
-- 按住右手柄 GRIP 接管，末端跟随手柄 delta 位姿；松开保持不动。
+- 按住自动选择或显式指定手柄的 GRIP 接管，末端跟随手柄 delta 位姿；松开保持不动。
 - 伺服错误码 14（速度超限）会自动加大 cmdT 降速；连续错误会自动结束伺服会话。
 - 启动后立即可以急停：Ctrl+C 会 ServoMoveEnd + 断链。

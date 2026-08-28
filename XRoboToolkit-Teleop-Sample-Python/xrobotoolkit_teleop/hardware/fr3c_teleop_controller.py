@@ -1,10 +1,9 @@
 """Single FR3C arm teleoperation controller (Fairino SDK, ServoJ streaming).
 
 Follows the official DualArmURController architecture: a dedicated servo
-thread streams the last IK solution to the robot with ServoJ while the main
-thread runs Placo IK at ~100 Hz, re-anchoring on the robot's ACTUAL joint
-angles every cycle.  Activation/deactivation and delta-pose handling are
-identical to the MuJoCo controller, so the sim and hardware feel the same.
+thread streams the last IK solution to the robot with ServoJ while another
+thread runs Placo IK at ~100 Hz. The IK state advances from the last command
+instead of delayed measured state, keeping the ServoJ trajectory continuous.
 
 Extend to dual arms by adding a second arm entry to manipulator_config, a
 second Fr3cController + servo thread, and the dual-arm URDF q slice.
@@ -18,6 +17,10 @@ import placo
 from placo_utils.visualization import robot_frame_viz, robot_viz
 
 from xrobotoolkit_teleop.common.xr_client import XrClient
+from xrobotoolkit_teleop.hardware.fr3c_control_utils import (
+    JointCommandTrajectory,
+    resolve_controller_side,
+)
 from xrobotoolkit_teleop.utils.geometry import (
     R_HEADSET_TO_WORLD,
     apply_delta_pose,
@@ -44,6 +47,7 @@ class Fr3cTeleopController:
         visualize_placo: bool = False,
         smooth_alpha: float = 0.35,
         max_joint_step_deg: float = 1.0,
+        controller_side: str = "auto",
     ):
         from xrobotoolkit_teleop.hardware.interface.fr3c import Fr3cController
 
@@ -54,19 +58,19 @@ class Fr3cTeleopController:
         self.visualize_placo = visualize_placo
         self.initial_joint_rad = np.deg2rad(np.asarray(initial_joint_deg, dtype=float))
         self.q_lo, self.q_hi = q_slice
-        # Servo-stream smoothing: exponential blend toward the IK target plus
-        # a hard per-tick slew cap (rad per cmd_t) that bounds joint velocity.
-        self.smooth_alpha = smooth_alpha
-        self.max_joint_step = np.deg2rad(max_joint_step_deg)
-
-        self.arm_name = "right_arm"
+        self.controller_side = resolve_controller_side(robot_ip, controller_side)
+        self.arm_name = f"{self.controller_side}_arm"
         self.manipulator_config = {
             self.arm_name: {
                 "link_name": ee_link_name,
-                "pose_source": "right_controller",
-                "control_trigger": "right_grip",
+                "pose_source": f"{self.controller_side}_controller",
+                "control_trigger": f"{self.controller_side}_grip",
             },
         }
+        print(
+            f"Controller side: {self.controller_side} "
+            f"(robot {robot_ip}, requested {controller_side})"
+        )
         self.deadzone = 0.1  # grip value above 1 - deadzone counts as active
 
         self.robot = Fr3cController(robot_ip=robot_ip, tool=tool, user=user, cmd_t=cmd_t)
@@ -94,11 +98,19 @@ class Fr3cTeleopController:
             self.init_controller_xyz[name] = None
             self.init_controller_quat[name] = None
 
-        # Anchor the IK state on the ACTUAL robot joints.
+        # Measured joints initialize the command once. During ServoJ streaming,
+        # Placo advances from the last command to avoid delayed feedback.
         actual_q = self.robot.get_current_joint_positions()
         self.placo_robot.state.q[self.q_lo : self.q_hi] = actual_q
         self.placo_robot.update_kinematics()
         self.target_q = actual_q.copy()
+        self.command_q = actual_q.copy()
+        self._state_lock = threading.Lock()
+        self.command_trajectory = JointCommandTrajectory(
+            alpha=smooth_alpha,
+            max_step_rad=np.deg2rad(max_joint_step_deg),
+        )
+        self.command_trajectory.reset(actual_q)
 
         # Hold the current pose until the first grip activation (a frame task
         # left at identity would slowly drag the arm toward the origin).
@@ -136,8 +148,9 @@ class Fr3cTeleopController:
         return delta_xyz, delta_rot
 
     def calc_target_joint_position(self):
-        current_q = self.robot.get_current_joint_positions()
-        self.placo_robot.state.q[self.q_lo : self.q_hi] = current_q
+        with self._state_lock:
+            command_q = self.command_q.copy()
+        self.placo_robot.state.q[self.q_lo : self.q_hi] = command_q
         self.placo_robot.update_kinematics()
 
         for arm_name, config in self.manipulator_config.items():
@@ -173,7 +186,9 @@ class Fr3cTeleopController:
 
         try:
             self.solver.solve(True)
-            self.target_q = self.placo_robot.state.q[self.q_lo : self.q_hi].copy()
+            target_q = self.placo_robot.state.q[self.q_lo : self.q_hi].copy()
+            with self._state_lock:
+                self.target_q = target_q
         except RuntimeError as e:
             print(f"IK solver failed: {e}. Keeping last target.")
 
@@ -184,8 +199,12 @@ class Fr3cTeleopController:
 
     def reset(self):
         self.robot.reset(self.initial_joint_rad)
-        self.target_q = self.robot.get_current_joint_positions().copy()
-        self.placo_robot.state.q[self.q_lo : self.q_hi] = self.target_q
+        reset_q = self.robot.get_current_joint_positions().copy()
+        with self._state_lock:
+            self.target_q = reset_q.copy()
+            self.command_q = reset_q.copy()
+        self.command_trajectory.reset(reset_q)
+        self.placo_robot.state.q[self.q_lo : self.q_hi] = reset_q
         self.placo_robot.update_kinematics()
         for name, config in self.manipulator_config.items():
             self.effector_task[name].T_world_frame = self.placo_robot.get_T_world_frame(
@@ -194,27 +213,36 @@ class Fr3cTeleopController:
 
     def run_arm_thread(self, stop_event: threading.Event):
         print("Starting arm servo thread...")
-        self.robot.start_servo()
-        q_cmd = self.robot.get_current_joint_positions()
-        while not stop_event.is_set():
-            # Exponential smoothing toward the IK target, with the step
-            # clipped to a per-tick slew cap that bounds joint velocity.
-            step = self.smooth_alpha * (self.target_q - q_cmd)
-            step = np.clip(step, -self.max_joint_step, self.max_joint_step)
-            q_cmd = q_cmd + step
-            self.robot.servo_joints(q_cmd)
-            if self.robot.servo_stream_dead:
-                print("Servo stream dead (persistent errors). Stopping arm thread.")
-                break
-        self.robot.stop_servo()
+        try:
+            self.robot.start_servo()
+            while not stop_event.is_set():
+                with self._state_lock:
+                    target_q = self.target_q.copy()
+                q_cmd = self.command_trajectory.advance(target_q)
+                self.robot.servo_joints(q_cmd)
+                with self._state_lock:
+                    self.command_q = q_cmd
+                if self.robot.servo_stream_dead:
+                    print("Servo stream dead (persistent errors). Stopping arm thread.")
+                    stop_event.set()
+                    break
+        except Exception as e:
+            print(f"Arm servo thread failed: {e}")
+            stop_event.set()
+        finally:
+            self.robot.stop_servo()
 
     def run_ik_thread(self, stop_event: threading.Event):
         print("Starting IK thread...")
-        while not stop_event.is_set():
-            start = time.monotonic()
-            self.calc_target_joint_position()
-            elapsed = time.monotonic() - start
-            time.sleep(max(0.0, IK_LOOP_PERIOD - elapsed))
+        try:
+            while not stop_event.is_set():
+                start = time.monotonic()
+                self.calc_target_joint_position()
+                elapsed = time.monotonic() - start
+                stop_event.wait(max(0.0, IK_LOOP_PERIOD - elapsed))
+        except Exception as e:
+            print(f"IK thread failed: {e}")
+            stop_event.set()
 
     def close(self):
         self.robot.close()

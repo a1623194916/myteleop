@@ -3,9 +3,8 @@
 Streams Placo IK joint targets to the robot via the Fairino SDK ServoJ
 interface — the same architecture as the official dual UR5e hardware sample.
 
-SAFETY: the arm will follow your controller as soon as you pull and hold the
-right GRIP.  Keep the e-stop within reach and clear the workspace before
-starting.
+SAFETY: the arm will follow the selected controller while its GRIP is held.
+Keep the e-stop within reach and clear the workspace before starting.
 
 Input: XRoboToolkit SDK (requires the PC service running and PICO connected).
 """
@@ -15,6 +14,7 @@ import tyro
 
 PICO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_URDF = str(PICO_ROOT / "fr3c_assets/fr3c_teleop.urdf")
+DEFAULT_MUJOCO_XML = str(PICO_ROOT / "fr3c_assets/scene_fr3c.xml")
 # Sim home pose (tool pointing straight down) — matches scene_fr3c.xml.
 DEFAULT_INITIAL_JOINT_DEG = [0.0, -90.0, 51.5708, -51.5708, 270.0, 0.0]
 
@@ -22,12 +22,15 @@ DEFAULT_INITIAL_JOINT_DEG = [0.0, -90.0, 51.5708, -51.5708, 270.0, 0.0]
 def main(
     robot_ip: str = "192.168.58.2",
     robot_urdf_path: str = DEFAULT_URDF,
+    mujoco_xml_path: str = DEFAULT_MUJOCO_XML,
     initial_joints_deg: list[float] = DEFAULT_INITIAL_JOINT_DEG,
     scale_factor: float = 1.0,
     cmd_t: float = 0.01,
     smooth_alpha: float = 0.35,
     max_joint_step_deg: float = 1.0,
+    controller_side: str = "auto",
     reset: bool = False,
+    visualize_mujoco: bool = True,
     visualize_placo: bool = False,
 ):
     """
@@ -44,6 +47,9 @@ def main(
             smoother but laggier; raise if the arm feels too sluggish.
         max_joint_step_deg: Hard joint-step cap per servo tick (deg). Bounds
             joint speed (default 1 deg/tick at cmd_t=0.01 -> 100 deg/s).
+        controller_side: "auto", "left", or "right". Auto maps robot IP
+            192.168.5.22 to left and 192.168.5.23 to right.
+        visualize_mujoco: Show a MuJoCo mirror of measured hardware joints.
         visualize_placo: Open the MeshCat Placo visualization in a browser.
     """
     from xrobotoolkit_teleop.common.xr_client import XrClient
@@ -62,6 +68,7 @@ def main(
         visualize_placo=visualize_placo,
         smooth_alpha=smooth_alpha,
         max_joint_step_deg=max_joint_step_deg,
+        controller_side=controller_side,
     )
 
     import threading
@@ -84,17 +91,31 @@ def main(
     arm_thread.start()
     ik_thread.start()
 
-    while not stop_signal.is_set():
+    try:
+        if visualize_mujoco:
+            from xrobotoolkit_teleop.hardware.fr3c_mujoco_mirror import (
+                Fr3cMujocoMirror,
+            )
+
+            mirror = Fr3cMujocoMirror(mujoco_xml_path)
+            mirror.run(stop_signal, controller.robot.get_current_joint_positions)
+        else:
+            while not stop_signal.is_set():
+                stop_signal.wait(0.05)
+    except KeyboardInterrupt:
+        print("KeyboardInterrupt detected. Exiting...")
+    except Exception as e:
+        print(f"Hardware visualization/control loop failed: {e}")
+    finally:
+        stop_signal.set()
+
+    while arm_thread.is_alive() or ik_thread.is_alive():
         try:
-            import time
-
-            time.sleep(0.05)
+            arm_thread.join(timeout=0.1)
+            ik_thread.join(timeout=0.1)
         except KeyboardInterrupt:
-            print("KeyboardInterrupt detected. Exiting...")
+            print("KeyboardInterrupt detected while stopping...")
             stop_signal.set()
-
-    arm_thread.join()
-    ik_thread.join()
     controller.close()
     print("FR3C teleoperation stopped.")
 
