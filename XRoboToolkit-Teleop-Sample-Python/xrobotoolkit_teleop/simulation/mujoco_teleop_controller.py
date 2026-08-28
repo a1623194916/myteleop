@@ -28,22 +28,10 @@ class MujocoTeleopController(BaseTeleopController):
         scale_factor=1.0,
         dt=0.01,
         mj_qpos_init=None,
-        xr_client=None,
-        viewer_camera=None,
-        pre_step_callback=None,
-        post_step_callback=None,
     ):
         self.visualize_placo = visualize_placo
         self.xml_path = xml_path
         self.mj_qpos_init = mj_qpos_init
-        self.pre_step_callback = pre_step_callback
-        self.post_step_callback = post_step_callback
-        self.viewer_camera = viewer_camera or {
-            "azimuth": 0,
-            "elevation": -50,
-            "distance": 2.0,
-            "lookat": [0.2, 0.0, 0.0],
-        }
 
         # To be initialized later
         self.mj_model = None
@@ -58,7 +46,6 @@ class MujocoTeleopController(BaseTeleopController):
             scale_factor,
             q_init=None,
             dt=dt,
-            xr_client=xr_client,
         )
 
         if visualize_placo:
@@ -139,14 +126,9 @@ class MujocoTeleopController(BaseTeleopController):
 
     def _update_mocap_target(self):
         for name, task in self.effector_task.items():
+            T_world_target = task.T_world_frame
             mocap_idx = self.target_mocap_idx.get(name)
-            if mocap_idx is None or mocap_idx == -1:
-                continue
-
-            if self.effector_control_mode[name] == "position":
-                self.mj_data.mocap_pos[mocap_idx] = task.target_world
-            else:
-                T_world_target = task.T_world_frame
+            if mocap_idx is not None and mocap_idx != -1:
                 self.mj_data.mocap_pos[mocap_idx] = T_world_target[:3, 3]
                 self.mj_data.mocap_quat[mocap_idx] = tf.quaternion_from_matrix(T_world_target)
 
@@ -161,30 +143,24 @@ class MujocoTeleopController(BaseTeleopController):
 
         return ee_xyz, ee_quat
 
-    def step(self):
-        """Advance one complete teleoperation control and simulation step."""
-        if self.pre_step_callback is not None:
-            self.pre_step_callback()
-        self._update_robot_state()
-        self._update_ik()
-        self._update_gripper_target()
-        self._update_mocap_target()
-        self._send_command()
-        mujoco.mj_step(self.mj_model, self.mj_data)
-        if self.post_step_callback is not None:
-            self.post_step_callback()
-
     def run(self):
         with mj_viewer.launch_passive(self.mj_model, self.mj_data) as viewer:
             # Set up viewer camera
-            viewer.cam.azimuth = self.viewer_camera["azimuth"]
-            viewer.cam.elevation = self.viewer_camera["elevation"]
-            viewer.cam.distance = self.viewer_camera["distance"]
-            viewer.cam.lookat = self.viewer_camera["lookat"]
+            viewer.cam.azimuth = 0
+            viewer.cam.elevation = -50
+            viewer.cam.distance = 2.0
+            viewer.cam.lookat = [0.2, 0, 0]
 
             while not self._stop_event.is_set():
                 try:
-                    self.step()
+                    self._update_robot_state()
+                    self._update_ik()
+                    self._update_gripper_target()
+                    self._update_mocap_target()
+                    self._send_command()
+
+                    # Step simulation and update viewer
+                    mujoco.mj_step(self.mj_model, self.mj_data)
                     viewer.sync()
                 except KeyboardInterrupt:
                     print("\nTeleoperation stopped.")

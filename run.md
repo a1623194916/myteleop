@@ -12,75 +12,34 @@ source .venv/bin/activate
 cd /home/u22/kyz/pico_software
 python test_pico_xrt_pipeline.py
 
-# NG01 双臂 + 夹爪仿真
+# FR3C 单臂遥操（MuJoCo 仿真）
+
+## 资产生成（一次性）
+
+```bash
+cd /home/u22/kyz/pico_software
+XRoboToolkit-Teleop-Sample-Python/.venv/bin/python fr3c_assets/build_fr3c_assets.py
+```
+
+## 假输入无头测试（推荐先跑）
 
 ```bash
 cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
-```
-
-## 假输入可视化（推荐先运行）
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_dual_ng01_mujoco.py --input-source fake
-```
-
-## 假输入无头测试（10 秒）
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_dual_ng01_mujoco.py --input-source fake --headless-duration 10
-```
-
-## 完整位姿控制
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_dual_ng01_mujoco.py --input-source fake --control-mode pose
-```
-
-## 连接真实 PICO
-
-先启动 XRoboToolkit PC Service 并连接 PICO，然后运行：
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_dual_ng01_mujoco.py --input-source pico
-```
-
-### 遥操流程（对齐后再开始）
-
-1. 启动后机器人处于初始位姿（home），MuJoCo 窗口中两个绿色小球标出初始手部目标位置。
-2. 手持手柄对准绿色小球（对齐只是引导，不强制精确重合）。
-3. 侧面 GRIP 键（扳机侧键）捏住即接管对应手臂：小球变橙色，手臂跟随手柄运动。
-4. 食指扳机（trigger）随时控制对应夹爪开合。
-5. 按 X（左手柄）/ B（右手柄）释放该臂，机械臂平滑回到初始位姿；松开 GRIP 后可重新对齐、再次接管。
-6. 若遥操仍无反应，看终端每 2 秒打印的 `xr |` 状态行：`pose[INVALID]` 或数值不变说明 PICO 数据链路没通，先用 `python test_pico_xrt_pipeline.py` 排查。
-
-## 运行测试
-
-```bash
-PYTHONPATH=. .venv/bin/python -m unittest discover -s tests -p 'test_*.py'
-```
-
-# FR3C 单臂遥操（MuJoCo 仿真）
-
-资产生成（一次性）：
-`ash
-cd /home/u22/kyz/pico_software
-XRoboToolkit-Teleop-Sample-Python/.venv/bin/python fr3c_assets/build_fr3c_assets.py
-`
-
-假输入测试（无头，推荐先跑）：
-`ash
-cd XRoboToolkit-Teleop-Sample-Python
 PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake --headless-duration 10
-`
+```
 
-完整位姿控制：
-`ash
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake --control-mode pose
-`
+## 带可视化窗口运行
 
-连接真实 PICO（先启动 XRoboToolkit PC Service）：
-`ash
+```bash
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake
+```
+
+## 连接真实 PICO（先启动 XRoboToolkit PC Service 并连接 PICO）
+
+```bash
 PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source pico
-`
+```
 
-操作：按住右侧 GRIP 接管机械臂（标记变橙），按 B 回 home；扳机留给后续夹爪。
+## 操作方式
+
+按住右侧 GRIP 接管机械臂（末端跟随手柄 delta 位姿），松开 GRIP 则停在当前位置。与官方 UR5e 示例的控制方式一致。
