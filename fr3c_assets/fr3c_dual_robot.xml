@@ -17,7 +17,7 @@
     <mesh name="right_wrist3_Link" content_type="model/stl" file="fr3c_stl/wrist3_Link.STL" />
   </asset>
   <worldbody>
-    <body name="left_robot_base" pos="0 0.275 0" quat="0 0 0 1">
+    <body name="left_robot_base" pos="0.0 0.275 0.0" quat="0.707106781 0 0 0.707106781">
       <geom type="mesh" mesh="left_base_link" />
       <body name="left_shoulder_Link">
         <inertial pos="-0.00016 -0.01399 0.00153" quat="0.64577 0.615434 -0.306567 0.332024" mass="1.69" diaginertia="0.00231646 0.00229487 0.00172046" />
@@ -50,7 +50,7 @@
         </body>
       </body>
     </body>
-    <body name="right_robot_base" pos="0 -0.275 0" quat="0 0 0 1">
+    <body name="right_robot_base" pos="0.0 -0.275 0.0" quat="0.707106781 0 0 0.707106781">
       <geom type="mesh" mesh="right_base_link" />
       <body name="right_shoulder_Link">
         <inertial pos="-0.00016 -0.01399 0.00153" quat="0.64577 0.615434 -0.306567 0.332024" mass="1.69" diaginertia="0.00231646 0.00229487 0.00172046" />

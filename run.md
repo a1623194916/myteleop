@@ -63,6 +63,20 @@ cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --input-source fake --headless-duration 10
 ```
 
+## 从真机当前位姿开始仿真（遥操前预验证）
+
+先确认两台真机可达，再带 IP 启动（只读关节角，不会发运动指令）：
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --input-source pico \
+  --robot-left-ip 192.168.5.22 --robot-right-ip 192.168.5.23
+
+
+```
+
+连 PICO 遥操同理，把 `--input-source fake` 换成 `pico`。
+
 ## 带可视化窗口运行
 
 ```bash
@@ -70,13 +84,41 @@ cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --input-source fake
 ```
 
+
+
+
 ## 连接真实 PICO（先启动 XRoboToolkit PC Service 并连接 PICO）
 
 ```bash
 export DISPLAY=:1
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --input-source pico
 ```
 
 ## 操作方式
 
 右手柄 GRIP 接管右臂，左手柄 GRIP 接管左臂，各自独立跟随手柄 delta 位姿。
+
+# FR3C 单臂真机遥操（Fairino SDK ServoJ 流）
+
+## 前置
+
+- XRoboToolkit PC Service 已启动、PICO 已连接
+- FR3C 控制器 IP 可达（默认 192.168.5.23，`--robot-ip` 可改）
+- 遥操 venv 能 `import Robot`（自动找 fair_ws 下的 mine/Robot.so 或 linux/fairino）
+
+## 启动
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.23 --visualize-placo
+```
+
+可选参数：`--reset`（先 MoveJ 到初始位姿，默认与仿真 home 一致的工具朝下位姿，`--initial-joints-deg 0 -90 51.57 -51.57 270 0` 可改）、`--cmd-t 0.01`（ServoJ 周期）、`--scale-factor 1.0`、`--visualize-placo`（浏览器看 IK）。
+
+## 操作方式与安全
+
+- 按住右手柄 GRIP 接管，末端跟随手柄 delta 位姿；松开保持不动。
+- 伺服错误码 14（速度超限）会自动加大 cmdT 降速；连续错误会自动结束伺服会话。
+- 启动后立即可以急停：Ctrl+C 会 ServoMoveEnd + 断链。

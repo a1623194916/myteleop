@@ -87,6 +87,8 @@ def main(
     visualize_placo: bool = False,
     input_source: str = "pico",
     headless_duration: float = 0.0,
+    robot_left_ip: str = "",
+    robot_right_ip: str = "",
 ):
     """
     Run dual FR3C teleoperation in MuJoCo.
@@ -94,6 +96,9 @@ def main(
     Args:
         input_source: "pico" for real headset, "fake" for scripted test motion.
         headless_duration: If > 0, run without viewer for this many seconds.
+        robot_left_ip: If set (with robot_right_ip), read the real arm's
+            current joints via the Fairino SDK and start the sim from that pose.
+        robot_right_ip: See robot_left_ip.
     """
     if input_source == "fake":
         _install_fake_xrt()
@@ -101,6 +106,20 @@ def main(
     from xrobotoolkit_teleop.simulation.mujoco_teleop_controller import (
         MujocoTeleopController,
     )
+
+    qpos_init = None
+    if robot_left_ip or robot_right_ip:
+        from xrobotoolkit_teleop.hardware.interface.fr3c import Fr3cController
+
+        if not (robot_left_ip and robot_right_ip):
+            raise SystemExit("Both --robot-left-ip and --robot-right-ip are required.")
+        qpos_init = np.zeros(12)
+        for i, (side, ip) in enumerate((("left", robot_left_ip), ("right", robot_right_ip))):
+            arm = Fr3cController(robot_ip=ip)
+            q = arm.get_current_joint_positions()
+            arm.close()
+            qpos_init[i * 6 : (i + 1) * 6] = q
+            print(f"{side} arm ({ip}) current joints (deg): {np.round(np.rad2deg(q), 3).tolist()}")
 
     config = {
         "right_hand": {
@@ -123,15 +142,16 @@ def main(
         manipulator_config=config,
         scale_factor=scale_factor,
         visualize_placo=visualize_placo,
+        mj_qpos_init=qpos_init,
     )
 
-    # Joint regularization toward home (same pattern as the UR5e sample)
+    # Joint regularization toward the start pose (same pattern as the UR5e sample)
     joints_task = controller.solver.add_joints_task()
-    home = controller.mj_model.key("home").qpos
+    start_q = qpos_init if qpos_init is not None else controller.mj_model.key("home").qpos
     joint_targets = {name: 0.0 for name in controller.placo_robot.joint_names()}
     for i, side in enumerate(SIDES):
         for j in range(6):
-            joint_targets[f"{side}_j{j + 1}"] = float(home[i * 6 + j])
+            joint_targets[f"{side}_j{j + 1}"] = float(start_q[i * 6 + j])
     joints_task.set_joints(joint_targets)
     joints_task.configure("joints_regularization", "soft", 1e-4)
 
