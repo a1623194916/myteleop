@@ -45,6 +45,36 @@ class Ng01MujocoModelTest(unittest.TestCase):
             body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, body_name)
             self.assertNotEqual(model.body_mocapid[body_id], -1)
 
+    def test_base_and_torso_presented_as_meshes_with_box_collision(self):
+        model = mujoco.MjModel.from_xml_path(str(TELEOP_MJCF))
+
+        # visual: the real (decimated) chassis and torso meshes
+        for geom_name, mesh_name in (
+            ("base_visual", "base_LINK"),
+            ("torso_visual", "up_down_link"),
+        ):
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+            self.assertNotEqual(geom_id, -1)
+            self.assertEqual(model.geom_type[geom_id], mujoco.mjtGeom.mjGEOM_MESH)
+            mesh_id = model.geom_dataid[geom_id]
+            self.assertEqual(
+                mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_MESH, mesh_id), mesh_name
+            )
+            face_count = (
+                model.mesh_faceadr[mesh_id + 1] - model.mesh_faceadr[mesh_id]
+                if mesh_id + 1 < model.nmesh
+                else model.nface - model.mesh_faceadr[mesh_id]
+            )
+            self.assertLessEqual(face_count, 200_000)
+
+        # collision: the original boxes must stay (the full-mesh convex hull
+        # of the base would swallow the torso) but render invisible (alpha 0)
+        # now that the real meshes are drawn
+        for geom_name in ("base_collision", "torso_collision"):
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+            self.assertEqual(model.geom_type[geom_id], mujoco.mjtGeom.mjGEOM_BOX)
+            self.assertEqual(model.geom_rgba[geom_id][3], 0.0)
+
     def test_teleop_model_steps_without_non_finite_state(self):
         model = mujoco.MjModel.from_xml_path(str(TELEOP_MJCF))
         data = mujoco.MjData(model)

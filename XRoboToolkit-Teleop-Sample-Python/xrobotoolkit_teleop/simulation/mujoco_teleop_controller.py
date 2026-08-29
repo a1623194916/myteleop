@@ -128,11 +128,15 @@ class MujocoTeleopController(BaseTeleopController):
 
     def _update_mocap_target(self):
         for name, task in self.effector_task.items():
-            T_world_target = task.T_world_frame
             mocap_idx = self.target_mocap_idx.get(name)
             if mocap_idx is not None and mocap_idx != -1:
-                self.mj_data.mocap_pos[mocap_idx] = T_world_target[:3, 3]
-                self.mj_data.mocap_quat[mocap_idx] = tf.quaternion_from_matrix(T_world_target)
+                if self.effector_control_mode.get(name) == "position":
+                    # position-only task: keep the sphere orientation, move its center
+                    self.mj_data.mocap_pos[mocap_idx] = task.target_world
+                else:
+                    T_world_target = task.T_world_frame
+                    self.mj_data.mocap_pos[mocap_idx] = T_world_target[:3, 3]
+                    self.mj_data.mocap_quat[mocap_idx] = tf.quaternion_from_matrix(T_world_target)
 
     def _get_link_pose(self, ee_name):
         """Get the end effector position and orientation."""
