@@ -25,6 +25,10 @@ import numpy as np
 import tyro
 from meshcat import transformations as tf
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
+
 PICO_ROOT = Path(__file__).resolve().parents[3]
 NG01_ROOT = PICO_ROOT / "NG01_v4"
 
@@ -268,6 +272,9 @@ def build_manipulator_config(control_mode: str = "pose"):
                 "type": "parallel",
                 "gripper_trigger": f"{side}_trigger",
                 "joint_names": [f"{prefix}gripper_finger_joint"],
+                # default fully open (joint=0 rad, ~77.9mm); trigger 1 closes
+                # to 1.0472 rad.  calc_parallel_gripper_position in the
+                # controller linearly interpolates by the trigger value.
                 "open_pos": [0.0],
                 "close_pos": [1.0472],
             },
@@ -445,6 +452,24 @@ def build_controller(
         robot_urdf_path=_locklift_urdf_path(NG01_ROOT / "urdf" / "NG01_teleop.urdf"),
         manipulator_config=build_manipulator_config(control_mode=control_mode),
         scale_factor=scale_factor,
+        # NG01 arms extend along world +X and the user faces world +Y while
+        # teleoperating, so we want the controller's intrinsic axes to map
+        # directly to the world axes: lateral (+X) -> world X, forward (+Z)
+        # -> world Y, up (+Y) -> world Z.  This is a reflection (det = -1),
+        # which is fine for position-only tracking -- the controller-quote
+        # orientation mirror is acceptable for NG01 because the operator
+        # drives the TCP pose from the *user's* frame, not from the controller's
+        # orientation.  The shared R_HEADSET_TO_WORLD used by UR5e swaps
+        # X and Z, which on NG01 puts lateral hand motion into world -Y
+        # (the user's perceived "forward"), causing the reported
+        # "left/right became forward/back" bug.
+        R_headset_world=np.array(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0],
+            ]
+        ),
         visualize_placo=visualize_placo,
         viewer_camera=VIEWER_CAMERA,
     )

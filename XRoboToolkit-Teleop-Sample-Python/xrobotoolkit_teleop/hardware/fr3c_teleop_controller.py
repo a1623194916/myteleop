@@ -8,6 +8,8 @@ instead of delayed measured state, keeping the ServoJ trajectory continuous.
 Extend to dual arms by adding a second arm entry to manipulator_config, a
 second Fr3cController + servo thread, and the dual-arm URDF q slice.
 """
+import os
+import sys
 import threading
 import time
 
@@ -46,14 +48,19 @@ class Fr3cTeleopController:
         q_slice: tuple = (7, 13),
         R_headset_world: np.ndarray = R_HEADSET_TO_WORLD,
         visualize_placo: bool = False,
-        smooth_alpha: float = 0.35,
+        smooth_tau_s: float = 0.04,
         max_joint_step_deg: float = 1.0,
         controller_side: str = "auto",
-        input_smooth_alpha: float = 0.25,
+        input_min_cutoff_hz: float = 2.0,
+        input_beta: float = 0.02,
         position_deadband_mm: float = 1.5,
         rotation_deadband_deg: float = 0.5,
     ):
         from xrobotoolkit_teleop.hardware.interface.fr3c import Fr3cController
+
+        # Let the servo thread preempt the IK/render threads faster than the
+        # 5 ms default GIL switch interval.
+        sys.setswitchinterval(0.001)
 
         self.xr_client = xr_client
         self.robot_urdf_path = robot_urdf_path
@@ -103,14 +110,16 @@ class Fr3cTeleopController:
             self.init_controller_xyz[name] = None
             self.init_controller_quat[name] = None
             self.input_pose_filter[name] = PoseDeltaFilter(
-                alpha=input_smooth_alpha,
+                min_cutoff_hz=input_min_cutoff_hz,
+                beta=input_beta,
                 position_deadband_m=position_deadband_mm / 1000.0,
                 rotation_deadband_rad=np.deg2rad(rotation_deadband_deg),
             )
 
         print(
             "XR input filter: "
-            f"alpha={input_smooth_alpha}, position_deadband={position_deadband_mm} mm, "
+            f"one-euro min_cutoff={input_min_cutoff_hz} Hz, beta={input_beta}, "
+            f"position_deadband={position_deadband_mm} mm, "
             f"rotation_deadband={rotation_deadband_deg} deg"
         )
 
@@ -123,8 +132,9 @@ class Fr3cTeleopController:
         self.command_q = actual_q.copy()
         self._state_lock = threading.Lock()
         self.command_trajectory = JointCommandTrajectory(
-            alpha=smooth_alpha,
+            tau_s=smooth_tau_s,
             max_step_rad=np.deg2rad(max_joint_step_deg),
+            default_dt_s=cmd_t,
         )
         self.command_trajectory.reset(actual_q)
 
@@ -234,8 +244,20 @@ class Fr3cTeleopController:
                 config["link_name"]
             )
 
+    @staticmethod
+    def _raise_thread_priority():
+        """Best-effort SCHED_FIFO for the calling thread. Needs CAP_SYS_NICE
+        (e.g. sudo); silently ignored when unprivileged."""
+        try:
+            param = os.sched_param(os.sched_get_priority_min(os.SCHED_FIFO) + 10)
+            os.sched_setscheduler(0, os.SCHED_FIFO, param)
+            print("Servo thread running with SCHED_FIFO priority.")
+        except (AttributeError, OSError):
+            pass
+
     def run_arm_thread(self, stop_event: threading.Event):
         print("Starting arm servo thread...")
+        self._raise_thread_priority()
         try:
             self.robot.start_servo()
             while not stop_event.is_set():

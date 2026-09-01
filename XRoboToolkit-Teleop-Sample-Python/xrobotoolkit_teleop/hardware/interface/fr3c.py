@@ -7,7 +7,7 @@ the boundary, same as the rest of the framework.
 
 Servo session lifecycle (required by the controller):
     start_servo()          -> ServoMoveStart
-    servo_joints(q)  x N   -> ServoJ at ~cmdT pacing (blocks ~cmdT per call)
+    servo_joints(q)  x N   -> ServoJ on absolute cmd_t deadlines (metronomic)
     stop_servo()           -> ServoMoveEnd
 
 Error handling ported from field-proven practice (fairmove.py):
@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 
 import numpy as np
+
+from xrobotoolkit_teleop.hardware.fr3c_control_utils import AbsoluteDeadlinePacer
 
 DEFAULT_ROBOT_IP = "192.168.58.2"
 SERVO_CMD_T = 0.01  # ServoJ command period (s); Fairino recommends 0.008-0.016
@@ -71,6 +73,8 @@ class Fr3cController:
         self.tool = tool
         self.user = user
         self._cmd_t = cmd_t
+        self._pacer = AbsoluteDeadlinePacer(cmd_t)
+        self._last_send_late_s = 0.0
         self._servo_active = False
         self._consecutive_errors = 0
         self._wait_state_ready()
@@ -185,14 +189,20 @@ class Fr3cController:
         print("Servo session started.")
 
     def servo_joints(self, joint_positions: np.ndarray):
-        """Stream one joint target (RADIANS).  Blocks ~cmd_t per call so a
-        tight caller loop issues commands at the commanded rate, like the UR
-        interface's initPeriod/waitPeriod pacing."""
-        t0 = time.monotonic()
+        """Stream one joint target (RADIANS) on an absolute cmd_t schedule.
+
+        Pacing is metronomic (AbsoluteDeadlinePacer): the send always targets
+        the next cmd_t grid point, RPC latency eats the slack instead of
+        delaying the following point, and overruns catch up immediately. The
+        last tick's lateness is exposed via ``last_send_late_s`` for
+        diagnostics."""
+        late_s = self._pacer.tick()
+        self._last_send_late_s = late_s
         jpos_deg = np.rad2deg(np.asarray(joint_positions, dtype=float)).tolist()
         err = self.robot.ServoJ(jpos_deg, [0.0, 0.0, 0.0, 0.0], cmdT=self._cmd_t)
         if err == 14:
             self._cmd_t *= SERVO_SLOWDOWN_FACTOR
+            self._pacer.period_s = self._cmd_t
             print(f"ServoJ speed over limit; slowed cmd_t to {self._cmd_t * 1000:.1f} ms")
             self._consecutive_errors = 0
         elif err != 0:
@@ -202,8 +212,10 @@ class Fr3cController:
         else:
             self._consecutive_errors = 0
 
-        elapsed = time.monotonic() - t0
-        time.sleep(max(0.0, self._cmd_t - elapsed))
+    @property
+    def last_send_late_s(self) -> float:
+        """How late the previous ServoJ send woke past its deadline (s)."""
+        return self._last_send_late_s
 
     @property
     def servo_stream_dead(self) -> bool:

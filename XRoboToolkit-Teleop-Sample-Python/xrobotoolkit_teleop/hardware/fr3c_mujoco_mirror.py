@@ -1,5 +1,6 @@
 """Passive MuJoCo mirror for an FR3C controlled by the hardware backend."""
 
+import multiprocessing as mp
 import threading
 
 import mujoco
@@ -76,3 +77,59 @@ class Fr3cMujocoMirror:
                 stop_event.wait(refresh_period)
 
         stop_event.set()
+
+
+def _mirror_process_main(xml_path: str, shared_q, stop_event, refresh_hz: float):
+    """Entry point of the mirror subprocess (spawn-safe: module level)."""
+    mirror = Fr3cMujocoMirror(xml_path)
+
+    def provider() -> np.ndarray:
+        with shared_q.get_lock():
+            return np.array(shared_q)
+
+    mirror.run(stop_event, provider, refresh_hz=refresh_hz)
+
+
+class MirrorProcess:
+    """Renders the MuJoCo mirror in a SEPARATE process.
+
+    Rendering inside the servo process competes for the GIL with the ServoJ
+    stream and perturbs the send timing (visible as low-frequency wobble).
+    The control process only publishes measured joints into shared memory at
+    a light 30 Hz; the child does the mj_forward/rendering work.
+    """
+
+    def __init__(self, xml_path: str, refresh_hz: float = 30.0):
+        self._ctx = mp.get_context("spawn")
+        self.shared_q = self._ctx.Array("d", len(Fr3cMujocoMirror.joint_names), lock=True)
+        self.stop_event = self._ctx.Event()
+        self.refresh_hz = refresh_hz
+        self._process = self._ctx.Process(
+            target=_mirror_process_main,
+            args=(xml_path, self.shared_q, self.stop_event, refresh_hz),
+            daemon=True,
+        )
+        self._started = False
+
+    def start(self):
+        self._process.start()
+        self._started = True
+        print(f"MuJoCo mirror running in subprocess (pid {self._process.pid}, {self.refresh_hz:.0f} Hz).")
+
+    def publish(self, joint_positions: np.ndarray):
+        """Copy measured joints (radians) into the shared buffer."""
+        positions = np.asarray(joint_positions, dtype=float).ravel()
+        with self.shared_q.get_lock():
+            for index, value in enumerate(positions):
+                self.shared_q[index] = float(value)
+
+    def is_running(self) -> bool:
+        return self._started and self._process.is_alive()
+
+    def stop(self, timeout: float = 2.0):
+        self.stop_event.set()
+        if self._started and self._process.is_alive():
+            self._process.join(timeout=timeout)
+            if self._process.is_alive():
+                self._process.terminate()
+                self._process.join(timeout=1.0)

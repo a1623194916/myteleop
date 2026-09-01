@@ -5,12 +5,19 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
+from scripts.hardware.ng01_hw import (
+    GRIPPER_FINGER_MAX_RAD,
+    gripper_width_to_finger_rad,
+)
 from scripts.simulation.teleop_ng01_dual_mujoco import (
+    GRIPPER_MAX_OPEN_MM,
     JOINT_NAMES,
     VIEWER_CAMERA,
     build_controller,
     build_manipulator_config,
 )
+
+GRIPPER_OPEN_RAD = gripper_width_to_finger_rad(GRIPPER_MAX_OPEN_MM)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -72,11 +79,11 @@ class Ng01TeleopEntryPointTest(unittest.TestCase):
 
         self.assertAlmostEqual(
             self.controller.gripper_pos_target["left_hand"]["lgripper_finger_joint"],
-            1.0472 * 0.25,
+            GRIPPER_OPEN_RAD + (GRIPPER_FINGER_MAX_RAD - GRIPPER_OPEN_RAD) * 0.25,
         )
         self.assertAlmostEqual(
             self.controller.gripper_pos_target["right_hand"]["rgripper_finger_joint"],
-            1.0472 * 0.75,
+            GRIPPER_OPEN_RAD + (GRIPPER_FINGER_MAX_RAD - GRIPPER_OPEN_RAD) * 0.75,
         )
 
     def test_fake_input_runs_steps_with_finite_state(self):
@@ -98,11 +105,11 @@ class Ng01TeleopEntryPointTest(unittest.TestCase):
         self.assertTrue(np.isfinite(self.controller.mj_data.qpos).all())
         self.assertAlmostEqual(
             self.controller.gripper_pos_target["left_hand"]["lgripper_finger_joint"],
-            1.0472,
+            GRIPPER_FINGER_MAX_RAD,
         )
         self.assertAlmostEqual(
             self.controller.gripper_pos_target["right_hand"]["rgripper_finger_joint"],
-            0.0,
+            GRIPPER_OPEN_RAD,
         )
 
     def test_drag_mode_targets_follow_mocap_and_track(self):

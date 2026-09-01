@@ -26,14 +26,15 @@ def main(
     initial_joints_deg: list[float] = DEFAULT_INITIAL_JOINT_DEG,
     scale_factor: float = 1.0,
     cmd_t: float = 0.01,
-    smooth_alpha: float = 0.35,
+    smooth_tau_ms: float = 40.0,
     max_joint_step_deg: float = 1.0,
     controller_side: str = "auto",
-    input_smooth_alpha: float = 0.25,
+    input_min_cutoff_hz: float = 2.0,
+    input_beta: float = 0.02,
     position_deadband_mm: float = 1.5,
     rotation_deadband_deg: float = 0.5,
     reset: bool = False,
-    visualize_mujoco: bool = True,
+    visualize_mujoco: bool = False,
     visualize_placo: bool = False,
 ):
     """
@@ -46,20 +47,30 @@ def main(
         reset: Move the arm to --initial-joints-degree before starting.
         scale_factor: Controller motion gain (1.0 = 1:1).
         cmd_t: ServoJ command period in seconds (0.008 - 0.016 recommended).
-        smooth_alpha: Target smoothing factor per servo tick (0..1). Lower =
-            smoother but laggier; raise if the arm feels too sluggish.
+            Raise toward 0.014-0.016 if the timing diag shows a fat tail.
+        smooth_tau_ms: Command trajectory time constant (ms). The command
+            approaches the IK target with a time-based exponential, so servo
+            tick jitter changes the phase, never the velocity. Higher =
+            smoother but laggier.
         max_joint_step_deg: Hard joint-step cap per servo tick (deg). Bounds
             joint speed (default 1 deg/tick at cmd_t=0.01 -> 100 deg/s).
         controller_side: "auto", "left", or "right". Auto maps robot IP
             192.168.5.22 to left and 192.168.5.23 to right.
-        input_smooth_alpha: Low-pass factor applied to new XR samples.
+        input_min_cutoff_hz: One Euro filter cutoff at rest for XR deltas.
+            Lower = steadier while holding still (more lag while moving).
+        input_beta: One Euro speed-adaptive term for XR deltas. Higher =
+            snappier fast motions but more tremor pass-through.
         position_deadband_mm: Accumulated controller translation required
             before updating the IK target, in millimeters.
-        rotation_deadband_deg: Accumulated controller rotation required before
-            updating the IK target, in degrees.
+        rotation_deadband_deg: Accumulated controller rotation required
+            before updating the IK target, in degrees.
         visualize_mujoco: Show a MuJoCo mirror of measured hardware joints.
+            Renders in a SEPARATE process (never in the servo process — GIL
+            contention there perturbs ServoJ send timing).
         visualize_placo: Open the MeshCat Placo visualization in a browser.
     """
+    import gc
+
     from xrobotoolkit_teleop.common.xr_client import XrClient
     from xrobotoolkit_teleop.hardware.fr3c_teleop_controller import (
         Fr3cTeleopController,
@@ -74,13 +85,17 @@ def main(
         scale_factor=scale_factor,
         cmd_t=cmd_t,
         visualize_placo=visualize_placo,
-        smooth_alpha=smooth_alpha,
+        smooth_tau_s=smooth_tau_ms / 1000.0,
         max_joint_step_deg=max_joint_step_deg,
         controller_side=controller_side,
-        input_smooth_alpha=input_smooth_alpha,
+        input_min_cutoff_hz=input_min_cutoff_hz,
+        input_beta=input_beta,
         position_deadband_mm=position_deadband_mm,
         rotation_deadband_deg=rotation_deadband_deg,
     )
+    # Move the startup object graph out of the generational GC scans: a full
+    # collection mid-stream stalls the GIL (and the ServoJ send).
+    gc.freeze()
 
     import threading
 
@@ -102,14 +117,16 @@ def main(
     arm_thread.start()
     ik_thread.start()
 
+    mirror = None
     try:
         if visualize_mujoco:
-            from xrobotoolkit_teleop.hardware.fr3c_mujoco_mirror import (
-                Fr3cMujocoMirror,
-            )
+            from xrobotoolkit_teleop.hardware.fr3c_mujoco_mirror import MirrorProcess
 
-            mirror = Fr3cMujocoMirror(mujoco_xml_path)
-            mirror.run(stop_signal, controller.robot.get_current_joint_positions)
+            mirror = MirrorProcess(mujoco_xml_path)
+            mirror.start()
+            while not stop_signal.is_set() and mirror.is_running():
+                mirror.publish(controller.robot.get_current_joint_positions())
+                stop_signal.wait(1.0 / mirror.refresh_hz)
         else:
             while not stop_signal.is_set():
                 stop_signal.wait(0.05)
@@ -119,6 +136,8 @@ def main(
         print(f"Hardware visualization/control loop failed: {e}")
     finally:
         stop_signal.set()
+        if mirror is not None:
+            mirror.stop()
 
     while arm_thread.is_alive() or ik_thread.is_alive():
         try:

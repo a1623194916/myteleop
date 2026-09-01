@@ -4,7 +4,7 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from xrobotoolkit_teleop.hardware.fr3c_mujoco_mirror import Fr3cMujocoMirror
+from xrobotoolkit_teleop.hardware.fr3c_mujoco_mirror import Fr3cMujocoMirror, MirrorProcess
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -32,6 +32,21 @@ class Fr3cMujocoMirrorTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "6 joint positions"):
             mirror.set_joint_positions(np.zeros(5))
+
+
+class MirrorProcessTests(unittest.TestCase):
+    def test_publish_writes_measured_joints_to_shared_buffer(self):
+        mirror_process = MirrorProcess(str(SCENE_XML))
+
+        try:
+            mirror_process.publish(np.linspace(-0.2, 0.2, 6))
+            with mirror_process.shared_q.get_lock():
+                published = np.array(mirror_process.shared_q)
+        finally:
+            mirror_process.stop()
+
+        np.testing.assert_allclose(published, np.linspace(-0.2, 0.2, 6))
+        self.assertFalse(mirror_process.is_running())
 
 
 if __name__ == "__main__":
