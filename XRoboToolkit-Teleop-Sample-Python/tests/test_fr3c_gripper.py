@@ -1,3 +1,4 @@
+import threading
 import unittest
 
 from xrobotoolkit_teleop.hardware.fr3c_gripper import (
@@ -53,12 +54,25 @@ class FakeXrClient:
 
 
 class FakeFr3cRobot:
+    error_code = (0, 0)
+
     def __init__(self):
         self.positions = []
         self.activations = 0
+        self.active = True
+
+    def latched_fault_code(self):
+        return self.error_code
+
+    def reset_all_errors(self):
+        self.error_code = (0, 0)
+
+    def gripper_active(self, index=1):
+        return self.active
 
     def activate_gripper(self, **kwargs):
         self.activations += 1
+        self.active = True
 
     def move_gripper(self, position_percent, **kwargs):
         self.positions.append(position_percent)
@@ -131,6 +145,7 @@ class Fr3cInterfaceGripperTests(unittest.TestCase):
         self.sdk_robot = FakeSdkRobot()
         self.controller = object.__new__(Fr3cController)
         self.controller.robot = self.sdk_robot
+        self.controller._rpc_lock = threading.Lock()
 
     def test_activate_gripper_resets_then_activates(self):
         self.controller.activate_gripper(reset_delay=0.0, activation_delay=0.0)
@@ -150,6 +165,80 @@ class Fr3cInterfaceGripperTests(unittest.TestCase):
             self.sdk_robot.move_calls,
             [(1, 37, 40, 30, 1000, 1, 0, 0.0, 0, 0)],
         )
+
+
+class FaultyGripperRobot(FakeFr3cRobot):
+    """MoveGripper fails while a fault is latched; motion re-latches it.
+
+    Mirrors the live rig: every completed gripper motion trips servo drive
+    fault 8-1 (the tool-485 feedback channel never reports position), and a
+    latched fault rejects the next MoveGripper with 73.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.error_code = (8, 1)
+        self.reset_calls = 0
+
+    def reset_all_errors(self):
+        self.reset_calls += 1
+        self.error_code = (0, 0)
+
+    def move_gripper(self, position_percent, **kwargs):
+        if self.error_code != (0, 0):
+            raise RuntimeError("MoveGripper failed, error code 73")
+        self.positions.append(position_percent)
+        self.error_code = (8, 1)  # motion completion trips the fault again
+        return 0
+
+
+class Fr3cGripperRecoveryTests(unittest.TestCase):
+    def _controller(self, robot):
+        return Fr3cVrGripperController(
+            xr_client=FakeXrClient(trigger_value=0.0),
+            robot=robot,
+            controller_side="right",
+            min_position_change_percent=5.0,
+        )
+
+    def test_latched_fault_is_cleared_before_sending(self):
+        robot = FaultyGripperRobot()
+        controller = self._controller(robot)
+
+        controller.xr_client.trigger_value = 0.3
+        controller.update()
+
+        self.assertEqual(robot.reset_calls, 1)  # 8-1 cleared reactively
+        self.assertAlmostEqual(robot.positions[0], 73.68421052631578, places=6)
+
+    def test_no_reset_when_healthy(self):
+        robot = FaultyGripperRobot()
+        robot.error_code = (0, 0)
+        controller = self._controller(robot)
+
+        controller.xr_client.trigger_value = 0.3
+        controller._last_command_at_s = None  # bypass min interval
+        controller.update()
+
+        self.assertEqual(robot.reset_calls, 0)
+        self.assertEqual(len(robot.positions), 1)
+
+    def test_every_motion_retrips_and_is_cleared_again(self):
+        # Slider following: consecutive targets keep flowing despite the
+        # per-motion fault retrips, each cleared reactively.
+        robot = FaultyGripperRobot()
+        controller = self._controller(robot)
+        controller.xr_client.trigger_value = 0.2
+        controller.update()
+        controller._last_command_at_s = None
+        controller.xr_client.trigger_value = 0.5
+        controller.update()
+        controller._last_command_at_s = None
+        controller.xr_client.trigger_value = 0.8
+        controller.update()
+
+        self.assertEqual(len(robot.positions), 3)
+        self.assertEqual(robot.reset_calls, 3)
 
 
 if __name__ == "__main__":

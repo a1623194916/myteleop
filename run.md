@@ -1,3 +1,6 @@
+export CODEX_HOME="/home/u22/kyz/.codex-home2"
+codex --ask-for-approval never --sandbox danger-full-access
+
 # 真实遥操
 在 PICO 头显连接前，先在收发数据的机器上启动 XRoboToolkit PC Service：
 
@@ -104,7 +107,7 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --in
 
 - XRoboToolkit PC Service 已启动、PICO 已连接
 - FR3C 控制器 IP 可达（默认 192.168.5.23，`--robot-ip` 可改）
-- 遥操 venv 能 `import Robot`（自动找 fair_ws 下的 mine/Robot.so 或 linux/fairino）
+- 遥操 venv 能 `import Robot`（自动找 fair_ws 下的 `fairino-python-sdk-v2.2.9_robot3.9.9/linux/fairino`）
 
 ## 启动
 
@@ -133,7 +136,7 @@ PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-i
 ## 操作方式与安全
 
 - 按住自动选择或显式指定手柄的 GRIP 接管，末端跟随手柄 delta 位姿；松开保持不动。
-- 伺服错误码 14（速度超限）会自动加大 cmdT 降速；连续错误会自动结束伺服会话。
+- 伺服错误码 14 = "接口执行失败"：控制器有锁存故障（典型为会话启动时锁存的伺服驱动器 8-1 "Runaway fault"）时拒绝一切运动指令。程序会自动查故障码、ResetAllError 清除并继续推流（最多 10 轮、每 0.5s 一轮），清障后自动重新激活被去激活的夹爪；确认无故障的 14 才按超速处理加大 cmdT。恢复不了会快速结束伺服会话并给出明确提示。
 - 启动后立即可以急停：Ctrl+C 会 ServoMoveEnd + 断链。
 
 ## FR3C 平滑优化路线（ServoJ 低频抖动排查结论）
@@ -145,6 +148,174 @@ PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-i
 3. 客户端改造：EMA 改按时间常数（alpha=1-exp(-dt/tau)）；XR 输入换 One Euro Filter；伺服循环绝对节拍 + cmdT 试 12-16ms。
 4. 结构改造：MuJoCo 镜像/IK 与伺服线程隔离（独立进程），伺服进程 gc.disable + CPU 亲和。
 5. SDK/固件升级（治本）：官方 [fairino-python-sdk](https://github.com/FAIR-INNOVATION/fairino-python-sdk) 新版（V2.2.x，适配固件 V3.9.x）给 ServoJ/ServoMoveStart/ServoMoveEnd 加了 `cmdType=1` UDP 透传（控制器 20007 端口，免 HTTP 往返，发一次几十微秒），另有 ServoJMultiPos 单次批量 ≤10 点、状态反馈换 20005/CNDE 且周期可设 8ms。**filterT/gain 在最新版仍未开放**。注意新 SDK 无旧固件回退（CNDE 连不上则全部调用失败），需把控制器固件升到 V3.9.x；升级前先问法奥 V3.9.9 是否开放 filterT/gain。UDP 模式下错误码走 SetUDPCmdRpyCallback 异步回传，err14 自动降速逻辑要改为监听回调。
+
+# FR3C 双臂真机遥操（双夹爪）
+
+## 前置
+
+- XRoboToolkit PC Service 已启动、PICO 已连接
+- 两台 FR3C 控制器 IP 可达：左 `192.168.5.22`（左手柄 GRIP 接管 + 左 trigger 控左夹爪）、右 `192.168.5.23`（右手柄接管 + 右 trigger 控右夹爪）
+- 遥操 venv 能 `import Robot`
+- 控制器固件已升到 3.9.9，官方 SDK 已用 `fair_ws/fairino-python-sdk-v2.2.9_robot3.9.9`（git tag `v2.2.9_robot_v3.9.9`）替换，`interface/fr3c.py` 的 SDK 加载器已把它放在首位，`import Robot` 直接用新版（CNDE + XML-RPC）。
+- 两台控制器侧均已配置 HKV TG-9801 机械夹爪（控制器末端 485 桥接，`MoveGripper` 直接驱动）。**已知固件层问题**：夹爪的 485 位置反馈通道不通（`GetGripperCurPosition`/CNDE `gripper_position` 恒 0 或间歇掉 0，`GetGripperActivateStatus` 恒未激活，`ActGripper` 为空操作），因此每次运动结束时控制器的运动监督校验失败 → 锁存伺服驱动故障 8-1（"Runaway fault"）→ 下一条 `MoveGripper` 被 73 拒绝。程序已在夹爪线程内反应式清障（通过 8ms 状态包监测，出现即 ResetAllError，~0.1s 生效），配合**连续重定目标流**（关闭 motion_done 门控，运动中直接改目标，不给"完成校验"触发的机会），实测整段滑钮扫描 0 拒绝、夹爪连续跟随。若在网页示教器里把夹爪品牌/波特率配置修正、反馈通道恢复，跟随会更干净（不再需要反应式清障）。
+- trigger 是**真正的模拟量滑钮**：扳机行程线性映射闭合度（0=全开，97% 上限），1% 步进、0.15s 间隔连续下发，夹爪实时跟随手指；松开自动回全开。
+
+### 不用手柄：屏幕滑块直接控制夹爪
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/hardware/gripper_slider_hardware.py
+# 只控单臂: --no-left / --no-right
+# 无窗口自检(自动扫描): --auto-sweep --no-gui
+```
+
+弹出窗口里左右两条滑块（0=全开，100=闭合到 97%），拖动即跟随，关窗退出。
+该模式**手臂完全空闲**（不起伺服会话），只有夹爪会动。
+沿用与遥操完全相同的跟随控制器（含反应式 8-1 清障）。
+- **伺服故障 8-1**（官方附录3：伺服驱动器 "Runaway fault"，关节位置失控保护）：每次伺服会话启动瞬间会锁存一次，之后一切运动指令（ServoJ/ActGripper/MoveGripper）被错误码 14 拒绝，示教器不弹阻塞告警只在故障列表里。程序自动 ResetAllError 清除并续流（实测一次即清）；注意 ResetAllError 会**顺带去激活夹爪**，程序会在清障后自动后台重新激活夹爪。
+- SDK 没有专门的高频/连续夹爪伺服接口（无 GripperJogJ/夹爪 move-control），夹爪遥操只能用新 SDK 的非阻塞 `MoveGripper`（block=1）流式下发 + `GetGripperMotionDone` 门控 + 实时态 `GetGripperCurPosition` 读取。因此闭合最深默认只发到 97%（不发 100% 全闭合），留 3% 余量防空手顶死锁 8-1。
+
+## 启动
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_dual_hardware.py
+```
+
+先用假 PICO 输入校验 trigger→夹爪映射（不走真机）：
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/hardware/test_fr3c_gripper_trigger_mapping.py
+# 连真机 192.168.5.22 自主跑 MoveGripper（左手柄触发）：
+PYTHONPATH=. .venv/bin/python scripts/hardware/test_fr3c_gripper_trigger_mapping.py \
+  --robot-ip 192.168.5.22 --side left
+```
+
+## 操作方式
+
+- 每臂各跑一个独立 `Fr3cTeleopController`（Placo IK + ServoJ 流）：左手柄 GRIP 接管左臂、右手柄 GRIP 接管右臂，可同时、可独立，松开各自保持不动。
+- **回初始位姿**：按住左手柄 **Y** → 左臂、按住右手柄 **B** → 右臂，以限速（默认 60°/s，`--home-joint-speed-dps` 可调）平滑回到固定位姿（`DEFAULT_HOME_*_DEG`，2026-09-18 从真机实测捕获；可用 `--home-q-left-deg`/`--home-q-right-deg` 覆盖），松开按键停在当前位置。GRIP 按住时回位键失效，绝不会在遥操中把臂拽走。
+- 末端控制独立于 GRIP 接管（手臂未接管时也能操作）：
+  - **左 trigger** → 左夹爪模拟量映射：扳机深度 → 闭合程度（0=全开，闭合上限默认 97%，防空手顶死锁错误），按得越快闭合越快；松开自动回全开。目标变化 ≥ `--gripper-min-change`（默认 2%）才下发 `MoveGripper`。
+  - **右 trigger** → 右夹爪，映射方式完全相同（两夹爪共用同一组 `--gripper-*` 参数）。
+- Ctrl+C：结束两臂伺服会话、断链。
+
+## 参数要点
+
+- `--left-robot-ip` / `--right-robot-ip`：默认 `192.168.5.22` / `192.168.5.23`（左手柄操作 192.168.5.22）。
+- `--reset`：先 MoveJ 到初始位姿（左右共用同一 home）；默认不加，从当前位姿开始（与 Y/B 回位目标相互独立）。
+- 夹爪（两臂共用）：`--gripper-velocity 20`（闭合速度）、`--gripper-force 20`（力矩）、`--gripper-index 1`、`--activate-gripper`（默认开：启动时先 ResetAllError 清残留错误再 ActGripper 复位+激活，激活后逐臂复查故障）、`--gripper-closed-percent 97`（闭合上限）。
+- 回位：`--home-button-left Y` / `--home-button-right B`（传空串禁用该臂）、`--home-q-left-deg` / `--home-q-right-deg`（固定位姿，度）、`--home-joint-speed-dps 60`。
+- 其余平滑/滤波参数与单臂一致：`--cmd-t`、`--smooth-tau-ms`、`--max-joint-step-deg`、`--input-min-cutoff-hz`、`--input-beta`、`--position-deadband-mm`、`--rotation-deadband-deg`、`--scale-factor`。
+
+## 数据采集（Jetson 本机原始落盘 → 离线转 LeRobot）
+
+采集跑在 **Jetson 本机**(192.168.5.27): `dataset_recorder/record_server.py`。
+采集时只存 **原始 JPEG + 状态 JSONL**（不在线写 HDF5），
+每段一个目录；遥操机只把 **右手柄 A 键** 按压转成 START/STOP(不传图)。
+采集结束后再离线转 HDF5 / LeRobot。
+
+左右臂映射（已按当前机械臂布置更新）：
+
+- 左手柄 → 左臂 `192.168.5.22`
+- 右手柄 → 右臂 `192.168.5.23`
+
+> 遥操/采集同时跑时，为避免 CNDE 状态流(20005)同控制器只能 1 个客户端，
+> 遥操机 `RecordClient` 会把它独占拿到的关节/夹爪真值 push 到采集端 8767；
+> 采集端录制期间锁定状态来源，转发断流不会再回退本地直读。
+
+### 1. Jetson 启动采集服务
+
+```bash
+ssh nvidia@192.168.5.27
+cd ~/orbbec/dataset_recorder
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate orbbec
+python record_server.py --record-root /home/nvidia/datasets --port 8766
+```
+
+### 2. 遥操机启动遥操（`--record-server-host` 不传 = 纯遥操不采集）
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_dual_hardware.py \
+  --record-server-host 192.168.5.27 --record-server-port 8766 --record-task fr3c_dual
+```
+
+右手柄 **A 键** 开始/结束采集。原始数据在
+`/home/nvidia/datasets/fr3c_dual/episodes/ep_XXXXX/`：
+
+```
+state.jsonl                # 30Hz 关节(rad)+夹爪(%)+时间戳
+images/{SN}/*.jpg          # 相机 JPEG(只存新帧)
+images/{SN}/ns.jsonl       # 图像时间戳索引
+meta.json / done.json      # 元数据、帧数、丢帧统计、error
+```
+
+### 3. Jetson 上把原始数据转 HDF5（全部 episode）
+
+```bash
+cd ~/orbbec/dataset_recorder
+python convert_raw_to_h5.py --record-dir /home/nvidia/datasets --task fr3c_dual
+# 只转某一段: --only <episode_id>
+```
+
+生成 `episodes/ep_XXXXX.h5`，与旧版字段完全兼容
+（`v/left_joint_rad`、`v/right_joint_rad`、`v/gripper_pct`、
+`images/{SN}/jpeg`、`images/{SN}/ns`）。
+
+### 4. 转回训练机转 LeRobot
+
+先把 Jetson 的 `{task}/episodes/*.h5` 拷到本机，例如 `/home/u22/kyz/datasets`：
+
+```bash
+rsync -av nvidia@192.168.5.27:/home/nvidia/datasets/fr3c_dual/episodes/*.h5 \
+  /home/u22/kyz/datasets/fr3c_dual/episodes/
+```
+
+再转 LeRobot：
+
+```bash
+/home/u22/kyz/lerobot_env/bin/python \
+  /home/u22/kyz/pico_software/pico_recorder/convert_to_lerobot.py \
+  --record-dir /home/u22/kyz/datasets --task fr3c_dual \
+  --repo-id fr3c_dual --task-description "抓取水杯" --overwrite
+```
+
+输出在 `/home/u22/kyz/datasets/lerobot/fr3c_dual`
+（LeRobot v3 结构：`meta/`、`data/*.parquet`、`videos/...`）。
+
+### 实测基准（2026-09-18 端到端联调）
+
+- 状态采样 30.0Hz（间隔 p95=33ms，直读与遥操转发两种模式均达标；转发模式 0 NaN）
+- 相机 640x480@30 实测 ~28.7fps，图像只落新帧，无重复、无丢帧
+- 直读模式开录头 ~2.1s 状态为 NaN（CNDE 后台建连），遥操转发模式无此问题
+- STOP 正常返回并等待写盘排空（RecordClient STOP 专用 10s 超时）；转 HDF5 241 帧对齐
+
+> 直读 episode 结束时采集端会立刻关闭本地 CNDE 连接，把控制器的
+> CNDE 单客户端槽位还给遥操端；SDK 自动重连已在采集端禁用，
+> 不会出现"采集结束后遥操连不上 CNDE"的情况。
+
+# PICO 头显看 Orbbec 多相机画面（Jetson H.264 直推）
+
+Jetson 侧已部署（192.168.5.27:/home/nvidia/orbbec/）：
+- `orbbec_stream/pico_video.py`：控制端口 :13579（TCP 服务端）。PICO 客户端连上后发 `OPEN_CAMERA`（CAFE v1 二进制：magic CAFE + v1 + width/height/fps/bitrate/enableMvHevc/renderMode/port + PANORAMA + PICO IP），服务端解析后 **TCP 回连 PICO 的 ip:port**，按 `[u32 BE 长度][H264 AnnexB AU]` 发流；`CLOSE_CAMERA` 断流。编码 nvv4l2h264enc（Constrained Baseline，无 B 帧，insert-sps-pps + idrinterval）。
+- `orbbec_stream/video_frames.py`：LatestFrames 按序列号槽位存最新 BGR；`compose()` 拼 1280x720 letterbox 网格（1 台全屏、2 台左右、3-4 台 2x2），超 1 秒未更新的相机显示黑底 STALE 标签——慢相机不拖累整帧刷新。GstEncoder 走 appsrc(BGR)→videoconvert→nvvidconv→NVENC→h264parse；编码结果经有界队列 `get_encoded()` 取出（pico_video 兼容 on_encoded 回调式编码器）。
+- `stream_server.py --video` / `dataset_recorder/record_server.py --video`：在原 JPEG/ZMQ 采集之上复用同一次相机采集的 BGR 帧喂视频，**不二次开相机**，录制与推流可同时。无 `--video` 时零开销（懒加载）。无相机时可加 `--fake-camera` 冒烟。
+
+启动（Jetson）：
+
+```bash
+/home/nvidia/miniconda3/envs/orbbec/bin/python ~/orbbec/orbbec_stream/stream_server.py --video
+# 或采集+推流一体：
+/home/nvidia/miniconda3/envs/orbbec/bin/python ~/orbbec/dataset_recorder/record_server.py --video
+```
+
+头显侧需将 `pico_software/configs/orbbec_video_source.yml`（PANORAMA mono 1280x720@30 contentRatio 1.777778）push 到 `/sdcard/Android/data/com.xrobotoolkit.client/files/video_source.yml`（需 adb/设备就绪）。已在 Jetson 用模拟 PICO 客户端全链路验证：OPEN_CAMERA→NVENC→84-90 AU/3s→ffmpeg 解码通过；ZMQ GET 与 HDF5 采集回归正常。真机待办：Orbbec 相机接入（当前 lsusb 为 0）+ PICO 装 video_source.yml 实看。
 
 # NG01 双臂遥操（MuJoCo 仿真，可行性验证）
 

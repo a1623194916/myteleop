@@ -55,7 +55,7 @@ def main(
         max_joint_step_deg: Hard joint-step cap per servo tick (deg). Bounds
             joint speed (default 1 deg/tick at cmd_t=0.01 -> 100 deg/s).
         controller_side: "auto", "left", or "right". Auto maps robot IP
-            192.168.5.22 to left and 192.168.5.23 to right.
+            192.168.5.23 to left and 192.168.5.22 to right.
         input_min_cutoff_hz: One Euro filter cutoff at rest for XR deltas.
             Lower = steadier while holding still (more lag while moving).
         input_beta: One Euro speed-adaptive term for XR deltas. Higher =

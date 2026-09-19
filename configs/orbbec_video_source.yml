@@ -1,0 +1,28 @@
+- name: "ORBBEC_GRID"
+  camera: "PANORAMA"
+  description: "Jetson Orbbec mono camera grid"
+  properties:
+    - name: "visibleRatio"
+      type: "float"
+      value: 1.0
+    - name: "contentRatio"
+      type: "float"
+      value: 1.777778
+    - name: "heightCompressionFactor"
+      type: "float"
+      value: 1.0
+    - name: "RawImageRectSize"
+      type: "string"
+      value: "600x337.5"
+    - name: "CamWidth"
+      type: "int"
+      value: 1280
+    - name: "CamHeight"
+      type: "int"
+      value: 720
+    - name: "CamFPS"
+      type: "int"
+      value: 30
+    - name: "CamBitrate"
+      type: "int"
+      value: 4000000

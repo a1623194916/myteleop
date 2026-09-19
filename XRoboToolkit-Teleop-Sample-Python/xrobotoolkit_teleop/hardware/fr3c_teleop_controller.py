@@ -55,6 +55,9 @@ class Fr3cTeleopController:
         input_beta: float = 0.02,
         position_deadband_mm: float = 1.5,
         rotation_deadband_deg: float = 0.5,
+        home_button: str = "B",
+        home_joint_speed_dps: float = 60.0,
+        home_q_deg: list[float] | None = None,
     ):
         from xrobotoolkit_teleop.hardware.interface.fr3c import Fr3cController
 
@@ -116,6 +119,10 @@ class Fr3cTeleopController:
                 rotation_deadband_rad=np.deg2rad(rotation_deadband_deg),
             )
 
+        self.control_trigger_name = next(iter(self.manipulator_config.values()))[
+            "control_trigger"
+        ]
+
         print(
             "XR input filter: "
             f"one-euro min_cutoff={input_min_cutoff_hz} Hz, beta={input_beta}, "
@@ -131,6 +138,23 @@ class Fr3cTeleopController:
         self.target_q = actual_q.copy()
         self.command_q = actual_q.copy()
         self._state_lock = threading.Lock()
+        # Hold-button homing: while the button is down the IK target glides
+        # toward the fixed home pose (per-arm, captured on 2026-09-18 and
+        # overridable via --home-q-left/right-deg) at a bounded joint speed.
+        # Suppressed while the arm's grip is held, so homing can never yank
+        # an arm mid-teleoperation.
+        self.home_button = home_button
+        self.home_joint_speed_dps = float(home_joint_speed_dps)
+        if home_q_deg is not None:
+            if len(home_q_deg) != 6:
+                raise ValueError("home_q_deg must list 6 joint angles in degrees")
+            self.home_q = np.deg2rad(np.asarray(home_q_deg, dtype=float))
+        else:
+            self.home_q = actual_q.copy()
+        print(f"Home pose ({self.controller_side} arm, deg): "
+              f"{[round(float(v), 3) for v in np.rad2deg(self.home_q)]}")
+        self._homing = False
+        self._last_home_step_t: float | None = None
         self.command_trajectory = JointCommandTrajectory(
             tau_s=smooth_tau_s,
             max_step_rad=np.deg2rad(max_joint_step_deg),
@@ -179,7 +203,75 @@ class Fr3cTeleopController:
         )
         return delta_xyz * self.scale_factor, delta_rot
 
+    def _cancel_grip_sessions(self):
+        """Drop any live grip takeover so the next grip re-anchors cleanly."""
+        for arm_name, config in self.manipulator_config.items():
+            if self.init_ee_xyz[arm_name] is not None:
+                print(f"{arm_name} deactivated.")
+                self.init_ee_xyz[arm_name] = None
+                self.init_ee_quat[arm_name] = None
+                self.init_controller_xyz[arm_name] = None
+                self.init_controller_quat[arm_name] = None
+                self.input_pose_filter[arm_name].reset()
+                T_world_ee = self.placo_robot.get_T_world_frame(config["link_name"])
+                self.effector_task[arm_name].T_world_frame = T_world_ee
+
+    def _enter_home(self):
+        self._homing = True
+        self._last_home_step_t = None
+        self._cancel_grip_sessions()
+        print(f"Homing: hold {self.home_button} to keep moving to the initial pose.")
+
+    def _exit_home(self):
+        self._homing = False
+        with self._state_lock:
+            q = self.target_q.copy()
+        self.placo_robot.state.q[self.q_lo : self.q_hi] = q
+        self.placo_robot.update_kinematics()
+        for name, config in self.manipulator_config.items():
+            self.effector_task[name].T_world_frame = self.placo_robot.get_T_world_frame(
+                config["link_name"]
+            )
+        print("Home released; holding pose (re-grip to take over).")
+
+    def _advance_home_target(self):
+        """Move the IK target toward the initial pose at a bounded joint speed.
+
+        Time-based (real elapsed since the previous tick), so GIL jitter
+        changes the phase but not the homing speed, matching the rest of the
+        command-chain filters.
+        """
+        now = time.monotonic()
+        if self._last_home_step_t is None:
+            dt = IK_LOOP_PERIOD
+        else:
+            dt = min(0.1, max(0.0, now - self._last_home_step_t))
+        self._last_home_step_t = now
+        with self._state_lock:
+            target = self.target_q.copy()
+        max_step = np.deg2rad(self.home_joint_speed_dps) * dt
+        homed = target + np.clip(self.home_q - target, -max_step, max_step)
+        self.placo_robot.state.q[self.q_lo : self.q_hi] = homed
+        self.placo_robot.update_kinematics()
+        with self._state_lock:
+            self.target_q = homed
+
     def calc_target_joint_position(self):
+        grip_held = self.xr_client.get_key_value_by_name(
+            self.control_trigger_name
+        ) > (1.0 - self.deadzone)
+        if (
+            self.home_button
+            and not grip_held
+            and self.xr_client.get_button_state_by_name(self.home_button)
+        ):
+            if not self._homing:
+                self._enter_home()
+            self._advance_home_target()
+            return
+        if self._homing:
+            self._exit_home()
+
         with self._state_lock:
             command_q = self.command_q.copy()
         self.placo_robot.state.q[self.q_lo : self.q_hi] = command_q

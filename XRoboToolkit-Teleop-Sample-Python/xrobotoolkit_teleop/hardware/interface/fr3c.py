@@ -10,17 +10,55 @@ Servo session lifecycle (required by the controller):
     servo_joints(q)  x N   -> ServoJ on absolute cmd_t deadlines (metronomic)
     stop_servo()           -> ServoMoveEnd
 
-Error handling ported from field-proven practice (fairmove.py):
-error code 14 (speed over limit) auto-scales the command period down;
-a burst of consecutive errors flags the stream dead so the caller can stop.
+Error handling: the controller rejects every motion command with error 14
+("接口执行失败" / interface execution failed) while ANY robot-level fault is
+latched — e.g. servo drive fault 8-1 ("Runaway fault", joint position control
+lost; see the manual's Appendix 3), which latches once at servo-session start
+and clears cleanly with ResetAllError. That is NOT a speed problem: slowing
+the stream cannot fix it, so on 14 the interface polls GetRobotErrorCode,
+auto-clears resettable faults with ResetAllError and keeps streaming; a fault
+that survives repeated clears stops the session fast. Genuine per-step
+overspeed (no fault latched) still auto-scales cmdT down; a burst of
+consecutive errors flags the stream dead so the caller can stop.
 """
 import sys
+import threading
 import time
 from pathlib import Path
 
 import numpy as np
 
 from xrobotoolkit_teleop.hardware.fr3c_control_utils import AbsoluteDeadlinePacer
+
+
+class _ThreadSafeServerProxy:
+    """Serialize every XML-RPC call on one robot's connection.
+
+    The Fairino SDK stores a single ``xmlrpc.client.ServerProxy`` per robot
+    whose transport reuses one ``http.client.HTTPConnection`` across calls.
+    When the servo stream, an end-effector thread, and the forward-state loop
+    issue requests concurrently, the underlying connection state machine
+    interleaves and raises ``http.client.CannotSendRequest('Request-sent')``
+    (surfaced as ``Arm servo thread failed: Request-sent``), killing the servo
+    thread. Wrapping the proxy funnels all SDK traffic through one RLock no
+    matter which caller/thread issued it, fixing the stream without coupling
+    every call site to a shared lock.
+    """
+    def __init__(self, proxy: object):
+        self._proxy = proxy
+        self._lock = threading.RLock()
+
+    def __getattr__(self, name: str):
+        target = getattr(self._proxy, name)
+        if not callable(target):
+            return target
+        lock = self._lock
+
+        def locked(*args, **kwargs):
+            with lock:
+                return target(*args, **kwargs)
+
+        return locked
 
 DEFAULT_ROBOT_IP = "192.168.58.2"
 SERVO_CMD_T = 0.01  # ServoJ command period (s); Fairino recommends 0.008-0.016
@@ -29,10 +67,27 @@ RESET_ARRIVAL_TOL_DEG = 1.0
 RESET_TIMEOUT = 30.0
 MAX_CONSECUTIVE_SERVO_ERRORS = 50
 SERVO_SLOWDOWN_FACTOR = 1.5  # cmdT multiplier when the controller reports speed over limit (err 14)
+# Do not let the err-14 slowdown escalate without bound. Each 1.5x growth
+# makes the per-command step larger, which can keep the controller reporting
+# overspeed forever (cmdT realistically ballooned 10ms -> 6.5s). Cap it inside
+# the valid servo command period and let a persistent condition reach the
+# consecutive-error limit so the session stops instead of wedging.
+SERVO_MAX_CMD_T = 0.03
 
+# ServoJ error 14 = "接口执行失败" (interface execution failed). While any
+# robot-level fault is latched, the controller rejects ServoJ, ServoMoveEnd,
+# ActGripper etc. with this code regardless of the commanded motion. It is a
+# fault-state rejection, NOT joint overspeed, so the recovery is to detect and
+# clear the latched fault, not to slow the stream down.
+SERVO_ERR_INTERFACE_REJECTED = 14
+# How often (s) a rejected stream polls GetRobotErrorCode / retries
+# ResetAllError, and how many failed recovery rounds stop the session.
+SERVO_FAULT_POLL_INTERVAL_S = 0.5
+MAX_FAULT_RECOVERY_ATTEMPTS = 10
+
+# FR3C firmware is 3.9.9: only the matching official SDK works (CNDE + XML-RPC).
 FAIRINO_SDK_PATHS = [
-    "/home/u22/kyz/pico_software/fair_ws/fairino-python-sdk-v2.1.3.1_robot3.8.3/mine",
-    "/home/u22/kyz/pico_software/fair_ws/fairino-python-sdk-v2.1.3.1_robot3.8.3/linux/fairino",
+    "/home/u22/kyz/pico_software/fair_ws/fairino-python-sdk-v2.2.9_robot3.9.9/linux/fairino",
 ]
 
 
@@ -67,16 +122,35 @@ class Fr3cController:
         print(f"Connecting to FR3C at {robot_ip} ...")
         self._sdk = robot_module
         self.robot = robot_module.RPC(robot_ip)
-        if not robot_module.RPC.is_conect:
+        # Newer SDK (v2.2.x) exposes the connection flag as RPC.is_connect
+        # (older bindings used RPC.is_connect).
+        if not robot_module.RPC.is_connect:
             raise ConnectionError(f"FR3C XML-RPC connection failed ({robot_ip})")
         self.robot_ip = robot_ip
         self.tool = tool
         self.user = user
+        # The Fairino XML-RPC client reuses one underlying HTTP connection and
+        # is NOT thread safe: concurrent requests from the servo stream, the
+        # end-effector thread, and shutdown interleave the connection state
+        # machine (http.client.CannotSendRequest / ResponseNotReady).
+        # Every SDK call below therefore runs under this lock, and the raw
+        # connection is additionally wrapped so traffic from other holders of
+        # ``self.robot`` (e.g. end-effector threads / forward-state loop) is
+        # funneled through the same lock as well.
+        self._rpc_lock = threading.Lock()
+        proxy = getattr(self.robot, "robot", None)
+        if proxy is not None:
+            try:
+                self.robot.robot = _ThreadSafeServerProxy(proxy)
+            except (AttributeError, TypeError):
+                pass  # mock SDk used in offline tests
         self._cmd_t = cmd_t
         self._pacer = AbsoluteDeadlinePacer(cmd_t)
         self._last_send_late_s = 0.0
         self._servo_active = False
         self._consecutive_errors = 0
+        self._last_fault_check_s = 0.0
+        self._fault_recovery_attempts = 0
         self._wait_state_ready()
         print(f"Connected to FR3C at {robot_ip}")
 
@@ -137,15 +211,16 @@ class Fr3cController:
         if reset_delay < 0.0 or activation_delay < 0.0:
             raise ValueError("gripper activation delays must be non-negative")
 
-        err = self.robot.ActGripper(index, 0)
-        if err != 0:
-            raise RuntimeError(f"ActGripper reset failed, error code {err}")
+        with self._rpc_lock:
+            err = self.robot.ActGripper(index, 0)
+            if err != 0:
+                raise RuntimeError(f"ActGripper reset failed, error code {err}")
         time.sleep(reset_delay)
-        err = self.robot.ActGripper(index, 1)
-        if err != 0:
-            raise RuntimeError(f"ActGripper activation failed, error code {err}")
+        with self._rpc_lock:
+            err = self.robot.ActGripper(index, 1)
+            if err != 0:
+                raise RuntimeError(f"ActGripper activation failed, error code {err}")
         time.sleep(activation_delay)
-
     def move_gripper(
         self,
         position_percent: float,
@@ -163,26 +238,171 @@ class Fr3cController:
         if not 0 <= max_time_ms <= 30000:
             raise ValueError("max_time_ms must be in [0, 30000]")
 
-        err = self.robot.MoveGripper(
-            int(index),
-            int(round(position_percent)),
-            int(velocity),
-            int(force),
-            int(max_time_ms),
-            1,
-            0,
-            0.0,
-            0,
-            0,
-        )
+        with self._rpc_lock:
+            err = self.robot.MoveGripper(
+                int(index),
+                int(round(position_percent)),
+                int(velocity),
+                int(force),
+                int(max_time_ms),
+                1,
+                0,
+                0.0,
+                0,
+                0,
+            )
         if err != 0:
             raise RuntimeError(f"MoveGripper failed, error code {err}")
+        return err
+
+    def get_gripper_motion_done(self, index: int = 1) -> bool:
+        """True when the gripper finished its current move (SDK >= v2.2.x).
+
+        The new firmware reports gripper motion completion both via
+        ``GetGripperMotionDone`` and in the realtime state package. Letting a
+        teleop loop wait on this before issuing the next target is what keeps
+        continuous trigger-to-closure tracking smooth instead of re-sending into
+        an in-progress move.
+        """
+        try:
+            with self._rpc_lock:
+                ret = self.robot.GetGripperMotionDone()
+            err = int(ret[0])
+            if err != 0:
+                return True  # can't determine -> don't block teleop on that
+            fault, status = int(ret[1]), int(ret[2])
+            return status == 1 and fault == 0
+        except Exception:
+            return True  # safe default: never stall the send chain
+
+    def get_robot_error_code(self) -> tuple[int, int]:
+        """Latest latched robot-level error as (main, sub); (0, 0) = healthy."""
+        with self._rpc_lock:
+            err, codes = self.robot.GetRobotErrorCode()
+        if err != 0:
+            raise RuntimeError(f"GetRobotErrorCode failed, error code {err}")
+        return int(codes[0]), int(codes[1])
+
+    def ensure_fault_free(self, max_attempts: int = 3) -> bool:
+        """Clear resettable latched faults before starting a servo session.
+
+        Returns True when the robot reports no fault (or the query itself
+        fails, which must not block startup). Retries ResetAllError a few
+        times because a fault can re-latch between the clear and the recheck.
+        Gripper re-activation after a clear is the gripper controller's job
+        (single ownership — this path never touches the gripper).
+        """
+        for _ in range(max_attempts):
+            try:
+                main_code, sub_code = self.get_robot_error_code()
+            except Exception as e:
+                print(f"GetRobotErrorCode during preflight failed: {e}")
+                return True
+            if main_code == 0:
+                return True
+            print(f"Robot fault {main_code}-{sub_code} latched; ResetAllError...")
+            try:
+                self.reset_all_errors()
+            except Exception as e:
+                print(f"ResetAllError during preflight failed: {e}")
+            time.sleep(0.3)
+        try:
+            main_code, sub_code = self.get_robot_error_code()
+        except Exception as e:
+            print(f"GetRobotErrorCode during preflight failed: {e}")
+            return True
+        if main_code != 0:
+            print(
+                f"Robot fault {main_code}-{sub_code} persists after {max_attempts} "
+                "clear attempts; check the web pendant (fault may not be resettable)."
+            )
+            return False
+        return True
+
+    def reset_all_errors(self):
+        """Clear all resettable robot-level errors (e.g. latched 8-1).
+
+        Servo drive fault 8-1 ("Runaway fault", joint position control lost)
+        latches once at servo-session start and is cleared cleanly here.
+        NOTE: ResetAllError also DEACTIVATES the configured gripper; the
+        gripper controller re-activates it on its own thread (single
+        ownership: the servo path never touches the gripper).
+        """
+        with self._rpc_lock:
+            err = self.robot.ResetAllError()
+        if err != 0:
+            raise RuntimeError(f"ResetAllError failed, error code {err}")
+
+    def gripper_active(self, index: int = 1) -> bool:
+        """True when the realtime state reports the gripper active.
+
+        Unknown state (no pkg yet) returns False so callers re-activate.
+        NOTE: on the current rig (TG-9801 via tool-board 485) this pkg field
+        always reads 0 — do NOT use it to decide whether the gripper works.
+        """
+        try:
+            pkg = self.robot.robot_state_pkg
+            return pkg is not None and int(pkg.gripper_active) == 1
+        except Exception:
+            return False
+
+    def latched_fault_code(self) -> tuple[int, int]:
+        """(main, sub) robot fault from the realtime pkg — NO RPC round trip.
+
+        Reads the CNDE state that the SDK thread refreshes at 8 ms, so the
+        gripper control loop can poll it at full rate. (-1, -1) when the pkg
+        is missing (unknown).
+        """
+        try:
+            pkg = self.robot.robot_state_pkg
+            if pkg is None:
+                return (-1, -1)
+            return (int(pkg.main_code), int(pkg.sub_code))
+        except Exception:
+            return (-1, -1)
+
+    def recover_gripper(
+        self,
+        index: int = 1,
+        reset_delay: float = 1.0,
+        activation_delay: float = 2.0,
+    ):
+        """Full gripper recovery: clear latched errors, then reset+activate."""
+        self.reset_all_errors()
+        self.activate_gripper(
+            index=index, reset_delay=reset_delay, activation_delay=activation_delay
+        )
+
+    def set_tool_do(self, index: int, status: bool, smooth: int = 0, block: int = 1) -> int:
+        """Set a tool-side digital output (0 = off, 1 = on).
+
+        Used for binary end effectors such as a vacuum suction cup. Nonblocking
+        (``block=1``) by default so an edge-driven control loop never stalls on
+        the XML-RPC round trip.
+        """
+        if not 0 <= int(index) <= 1:
+            raise ValueError("tool DO index must be in [0, 1]")
+        with self._rpc_lock:
+            err = self.robot.SetToolDO(int(index), 1 if status else 0, int(smooth), int(block))
+        if err != 0:
+            raise RuntimeError(f"SetToolDO failed, error code {err}")
         return err
 
     def start_servo(self):
         if self._servo_active:
             return
-        err = self.robot.ServoMoveStart()
+        if not self.ensure_fault_free():
+            raise RuntimeError(
+                "ServoMoveStart refused: robot fault latched and not clearable"
+            )
+        with self._rpc_lock:
+            err = self.robot.ServoMoveStart()
+        if err != 0:
+            # A fault latched between the preflight and the start call also
+            # rejects ServoMoveStart with error 14; clear once and retry.
+            if self.ensure_fault_free():
+                with self._rpc_lock:
+                    err = self.robot.ServoMoveStart()
         if err != 0:
             raise RuntimeError(f"ServoMoveStart failed, error code {err}")
         self._servo_active = True
@@ -199,18 +419,62 @@ class Fr3cController:
         late_s = self._pacer.tick()
         self._last_send_late_s = late_s
         jpos_deg = np.rad2deg(np.asarray(joint_positions, dtype=float)).tolist()
-        err = self.robot.ServoJ(jpos_deg, [0.0, 0.0, 0.0, 0.0], cmdT=self._cmd_t)
-        if err == 14:
-            self._cmd_t *= SERVO_SLOWDOWN_FACTOR
+        with self._rpc_lock:
+            err = self.robot.ServoJ(jpos_deg, [0.0, 0.0, 0.0, 0.0], cmdT=self._cmd_t)
+        if err == 0:
+            self._consecutive_errors = 0
+            self._fault_recovery_attempts = 0
+            return
+        self._consecutive_errors += 1
+        now = time.monotonic()
+        if err == SERVO_ERR_INTERFACE_REJECTED and now - self._last_fault_check_s >= SERVO_FAULT_POLL_INTERVAL_S:
+            # Error 14 = the controller rejects the interface while a robot
+            # fault is latched; slowing the stream cannot fix that. Detect,
+            # auto-clear and resume; only genuine overspeed (no fault) is
+            # treated with the cmdT slowdown below.
+            self._last_fault_check_s = now
+            fault = (0, 0)
+            try:
+                fault = self.get_robot_error_code()
+            except Exception as e:
+                print(f"GetRobotErrorCode during servo recovery failed: {e}")
+            if fault[0] != 0:
+                # Death in the fault path is governed by the recovery-attempt
+                # budget below; the consecutive counter would hit its limit
+                # within a single poll interval (50 ticks at 10 ms = 0.5 s)
+                # long before any recovery round completes.
+                self._consecutive_errors = 0
+                self._fault_recovery_attempts += 1
+                if self._fault_recovery_attempts > MAX_FAULT_RECOVERY_ATTEMPTS:
+                    print(
+                        f"ServoJ rejected (14): robot fault {fault[0]}-{fault[1]} "
+                        f"could not be cleared after {MAX_FAULT_RECOVERY_ATTEMPTS} "
+                        "attempts. Stopping the stream."
+                    )
+                    self._consecutive_errors = max(
+                        self._consecutive_errors, MAX_CONSECUTIVE_SERVO_ERRORS
+                    )
+                    return
+                print(
+                    f"ServoJ rejected (14): robot fault {fault[0]}-{fault[1]} "
+                    f"latched; ResetAllError "
+                    f"({self._fault_recovery_attempts}/{MAX_FAULT_RECOVERY_ATTEMPTS})..."
+                )
+                try:
+                    self.reset_all_errors()
+                except Exception as e:
+                    print(f"ResetAllError during servo recovery failed: {e}")
+                return
+            # No fault latched: err 14 here means the per-step target jump is
+            # too large (genuine overspeed). Slow the stream down.
+            self._cmd_t = min(self._cmd_t * SERVO_SLOWDOWN_FACTOR, SERVO_MAX_CMD_T)
             self._pacer.period_s = self._cmd_t
-            print(f"ServoJ speed over limit; slowed cmd_t to {self._cmd_t * 1000:.1f} ms")
-            self._consecutive_errors = 0
-        elif err != 0:
-            self._consecutive_errors += 1
-            if self._consecutive_errors <= 5:
-                print(f"ServoJ error code {err} ({self._consecutive_errors} consecutive)")
-        else:
-            self._consecutive_errors = 0
+            print(
+                f"ServoJ speed over limit (err 14, no fault); cmd_t raised to "
+                f"{self._cmd_t * 1000:.1f} ms ({self._consecutive_errors} consecutive)"
+            )
+        elif err != 0 and self._consecutive_errors <= 5:
+            print(f"ServoJ error code {err} ({self._consecutive_errors} consecutive)")
 
     @property
     def last_send_late_s(self) -> float:
@@ -224,15 +488,34 @@ class Fr3cController:
     def stop_servo(self):
         if not self._servo_active:
             return
-        err = self.robot.ServoMoveEnd()
         self._servo_active = False
+        with self._rpc_lock:
+            err = self.robot.ServoMoveEnd()
+        if err != 0:
+            # A latched fault makes the controller reject ServoMoveEnd with
+            # error 14 as well; clear and retry once so the session ends
+            # cleanly instead of leaving the controller in servo mode. The
+            # session is over, so gripper re-activation is irrelevant here.
+            if self.ensure_fault_free():
+                with self._rpc_lock:
+                    err = self.robot.ServoMoveEnd()
         if err != 0:
             print(f"ServoMoveEnd failed, error code {err}")
         else:
             print("Servo session ended.")
 
     def close(self):
-        self.stop_servo()
+        try:
+            # Disable the SDK's auto-reconnect before closing: a recv error
+            # during the session spawns a reconnect thread that ignores the
+            # stop flag and would re-register CNDE after CloseRPC, keeping the
+            # controller's single-client slot occupied for every later client.
+            rpc_cls = type(self.robot)
+            if hasattr(rpc_cls, "_reconnect_enable"):
+                rpc_cls._reconnect_enable = False
+            self.stop_servo()
+        except Exception as e:
+            print(f"stop_servo raised during close: {e}")
         try:
             self.robot.CloseRPC()
         except Exception as e:
