@@ -27,6 +27,7 @@ class FakeSdkRobot:
 
     def __init__(self, servo_errors=0, fault=(0, 0), fault_clearable=True):
         self.servo_calls = 0
+        self.servo_cmd_types = []
         self.servo_errors = servo_errors  # return this error code for the first N ServoJ calls
         self.fault = fault
         self.fault_clearable = fault_clearable
@@ -39,8 +40,20 @@ class FakeSdkRobot:
         pkg = self.robot_state_pkg
         return pkg is not None and int(pkg.gripper_active) == 1
 
-    def ServoJ(self, joint_pos, axisPos, acc=0.0, vel=0.0, cmdT=0.008, filterT=0.0, gain=0.0, id=0):
+    def ServoJ(
+        self,
+        joint_pos,
+        axisPos,
+        acc=0.0,
+        vel=0.0,
+        cmdT=0.008,
+        filterT=0.0,
+        gain=0.0,
+        id=0,
+        cmdType=0,
+    ):
         self.servo_calls += 1
+        self.servo_cmd_types.append(cmdType)
         if self.servo_errors > 0:
             self.servo_errors -= 1
             return 14
@@ -55,7 +68,7 @@ class FakeSdkRobot:
             self.fault = (0, 0)
         return 0
 
-    def ServoMoveEnd(self):
+    def ServoMoveEnd(self, cmdType=0):
         self.move_end_calls += 1
         if self.fault != (0, 0):
             return 14
@@ -71,6 +84,7 @@ class ServoFaultRecoveryTests(unittest.TestCase):
         controller._pacer = AbsoluteDeadlinePacer(0.0001)
         controller._last_send_late_s = 0.0
         controller._servo_active = False
+        controller._servo_ready = threading.Event()
         controller._consecutive_errors = 0
         controller._last_fault_check_s = 0.0
         controller._fault_recovery_attempts = 0
@@ -131,6 +145,29 @@ class ServoFaultRecoveryTests(unittest.TestCase):
 
         self.assertEqual(controller._consecutive_errors, 0)
         self.assertEqual(controller._fault_recovery_attempts, 0)
+        self.assertTrue(controller.servo_ready)
+
+    def test_udp_transport_passes_cmd_type_one(self):
+        robot = FakeSdkRobot()
+        controller = self._controller(robot)
+        controller._servo_cmd_type = 1
+
+        controller.servo_joints(np.zeros(6))
+
+        self.assertEqual(robot.servo_cmd_types, [1])
+
+    def test_udp_servoj_does_not_wait_for_xmlrpc_lock(self):
+        robot = FakeSdkRobot()
+        controller = self._controller(robot)
+        controller._servo_cmd_type = 1
+
+        controller._rpc_lock.acquire()
+        try:
+            controller.servo_joints(np.zeros(6))
+        finally:
+            controller._rpc_lock.release()
+
+        self.assertEqual(robot.servo_calls, 1)
 
     def test_gripper_active_reads_state_pkg(self):
         robot = FakeSdkRobot()
@@ -139,6 +176,26 @@ class ServoFaultRecoveryTests(unittest.TestCase):
 
         robot.robot_state_pkg = types.SimpleNamespace(gripper_active=1)
         self.assertTrue(controller.robot.gripper_active())
+
+    def test_gripper_fault_reads_state_pkg(self):
+        robot = FakeSdkRobot()
+        controller = self._controller(robot)
+        self.assertEqual(controller.gripper_fault_code(), -1)
+
+        robot.robot_state_pkg = types.SimpleNamespace(gripper_fault=1)
+        self.assertEqual(controller.gripper_fault_code(), 1)
+
+    def test_gripper_recovery_request_is_serviced_by_servo_path(self):
+        robot = FakeSdkRobot()
+        controller = self._controller(robot)
+        controller._servo_active = True
+        controller._gripper_recovery_requested = threading.Event()
+        controller.request_gripper_recovery()
+
+        controller.servo_joints(np.zeros(6))
+
+        self.assertEqual(robot.reset_error_calls, 1)
+        self.assertFalse(controller._gripper_recovery_requested.is_set())
 
     def test_stop_servo_clears_fault_and_retries_move_end(self):
         robot = FakeSdkRobot(fault=(8, 1))

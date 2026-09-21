@@ -14,6 +14,9 @@ Usage (from XRoboToolkit-Teleop-Sample-Python):
     # same, with the real-teleop MuJoCo mirror running in-process to reproduce
     # the GIL contention of teleop_fr3c_hardware.py:
     PYTHONPATH=. .venv/bin/python scripts/hardware/diag_fr3c_servo_timing.py --robot-ip 192.168.5.23 --no-move --load mirror
+    # ServoJ plus explicit MoveGripper load (gripper must already be active):
+    PYTHONPATH=. .venv/bin/python scripts/hardware/diag_fr3c_servo_timing.py \
+        --robot-ip 192.168.5.23 --gripper-load --duration-s 30
     # tiny motion test (2 deg sine at 0.2 Hz around the current pose):
     PYTHONPATH=. .venv/bin/python scripts/hardware/diag_fr3c_servo_timing.py --robot-ip 192.168.5.23
 
@@ -100,12 +103,16 @@ def summarize(periods_ms: list[float], rpc_ms: list[float], wake_late_ms: list[f
 def main(
     robot_ip: str = "192.168.58.2",
     cmd_t: float = 0.010,
+    servo_transport: str = "udp",
     duration_s: float = 20.0,
     amplitude_deg: float = 1.0,
     freq_hz: float = 0.2,
     no_move: bool = False,
     mock: bool = False,
     load: str = "none",
+    gripper_load: bool = False,
+    gripper_period_s: float = 0.25,
+    gripper_position_percent: int = 50,
     csv_path: str | None = None,
 ):
     """Run the ServoJ timing diagnostic.
@@ -113,6 +120,8 @@ def main(
     Args:
         robot_ip: FR3C controller IP.
         cmd_t: ServoJ command period in seconds (matches teleop default 0.01).
+        servo_transport: ``udp`` uses the SDK's UDPServoJ path; ``xmlrpc``
+            retains the legacy round-trip path for comparison.
         duration_s: Streaming duration.
         amplitude_deg: Sine amplitude per joint when streaming (small by design).
         freq_hz: Sine frequency in Hz (0.2 Hz -> peak joint speed ~2.5 deg/s).
@@ -120,10 +129,25 @@ def main(
         mock: No robot; synthesize RPC latency to validate the tool offline.
         load: "none" or "mirror" (run the real-teleop MuJoCo mirror in-process
             to reproduce the GIL contention of teleop_fr3c_hardware.py).
+        gripper_load: While ServoJ is running, send a MoveGripper command from
+            a second thread. The gripper must already be activated. This is an
+            intentionally stressful diagnostic, not a teleop mode.
+        gripper_period_s: Interval between diagnostic MoveGripper calls.
+        gripper_position_percent: Position sent by the diagnostic gripper load.
         csv_path: Optional CSV log of every tick.
     """
     if load not in {"none", "mirror"}:
         raise SystemExit("load must be 'none' or 'mirror'")
+    transport = str(servo_transport).strip().lower()
+    if transport not in {"udp", "xmlrpc"}:
+        raise SystemExit("servo_transport must be 'udp' or 'xmlrpc'")
+    cmd_type = 1 if transport == "udp" else 0
+    if gripper_period_s <= 0.0:
+        raise SystemExit("gripper_period_s must be positive")
+    if not 0 <= gripper_position_percent <= 100:
+        raise SystemExit("gripper_position_percent must be in [0, 100]")
+    if gripper_load and (mock or no_move):
+        raise SystemExit("--gripper-load requires a real ServoJ motion test")
     if not no_move and not mock:
         print(f"SAFETY: arm will track a {amplitude_deg} deg, {freq_hz} Hz sine around the CURRENT pose.")
         print("Keep the e-stop at hand. Ctrl+C ends the session (ServoMoveEnd is sent).")
@@ -140,6 +164,29 @@ def main(
         state_getter = lambda: list(robot.robot_state_pkg.jt_cur_pos)  # noqa: E731
 
     stop = threading.Event()
+    gripper_stats = {"calls": 0, "errors": 0, "rpc_ms": []}
+    gripper_thread = None
+
+    def run_gripper_load():
+        """Deliberately share the SDK connection to expose RPC contention."""
+        while not stop.wait(gripper_period_s):
+            started = time.monotonic()
+            try:
+                err = rpc.MoveGripper(
+                    1, int(gripper_position_percent), 20, 20, 1000,
+                    1, 0, 0.0, 0, 0,
+                )
+                gripper_stats["calls"] += 1
+                gripper_stats["rpc_ms"].append((time.monotonic() - started) * 1000.0)
+                if err != 0:
+                    gripper_stats["errors"] += 1
+                    print(f"Diagnostic MoveGripper error {err}")
+            except Exception as exc:  # noqa: BLE001
+                gripper_stats["calls"] += 1
+                gripper_stats["errors"] += 1
+                gripper_stats["rpc_ms"].append((time.monotonic() - started) * 1000.0)
+                print(f"Diagnostic MoveGripper exception: {exc}")
+
     mirror = None
     if load == "mirror" and not mock:
         from xrobotoolkit_teleop.hardware.fr3c_mujoco_mirror import Fr3cMujocoMirror
@@ -155,7 +202,10 @@ def main(
 
     q0 = list(state_getter())
     probe_name = "ServoJ" if not no_move else "GetActualJointPosRadian"
-    print(f"Streaming {probe_name} at cmd_t={cmd_t * 1000:.1f} ms for {duration_s:.0f} s (load={load}) ...")
+    print(
+        f"Streaming {probe_name} at cmd_t={cmd_t * 1000:.1f} ms for "
+        f"{duration_s:.0f} s (transport={transport}, load={load}) ..."
+    )
 
     periods_ms: list[float] = []
     rpc_ms: list[float] = []
@@ -163,9 +213,13 @@ def main(
 
     try:
         if not no_move and not mock:
-            err = robot.ServoMoveStart()
+            err = robot.ServoMoveStart(cmdType=cmd_type)
             if err != 0:
                 raise SystemExit(f"ServoMoveStart failed, error {err}")
+        if gripper_load:
+            print("WARNING: diagnostic gripper load is active; keep the e-stop ready.")
+            gripper_thread = threading.Thread(target=run_gripper_load, name="diag-gripper", daemon=True)
+            gripper_thread.start()
 
         with TimingLogger(csv_path) as log:
             t_start = time.monotonic()
@@ -184,7 +238,10 @@ def main(
                 else:
                     phase = 2.0 * np.pi * freq_hz * (wake - t_start)
                     target = [q + amplitude_deg * np.sin(phase) for q in q0]
-                    err = robot.ServoJ(target, [0.0, 0.0, 0.0, 0.0], 0.0, 0.0, cmd_t, 0.0, 0.0)
+                    err = robot.ServoJ(
+                        target, [0.0, 0.0, 0.0, 0.0],
+                        0.0, 0.0, cmd_t, 0.0, 0.0, 0, cmd_type,
+                    )
                 send = time.monotonic()
                 rpc_ms.append((send - wake) * 1000.0)
                 if prev_send is not None:
@@ -196,7 +253,10 @@ def main(
                             rpc_ms=f"{rpc_ms[-1]:.3f}", measured_deg0=f"{state_getter()[0]:.4f}")
                 tick += 1
 
-                next_t += cmd_t
+                # Keep ServoJ call-start timing relative to the wake-up before
+                # the RPC. If the RPC itself exceeds cmd_t, the next call
+                # naturally starts late; it must never start early.
+                next_t = wake + cmd_t
                 remain = next_t - time.monotonic()
                 if remain > 0:
                     time.sleep(remain)
@@ -209,12 +269,19 @@ def main(
         stop.set()
         if not no_move and not mock:
             try:
-                robot.ServoMoveEnd()
+                robot.ServoMoveEnd(cmdType=cmd_type)
                 print("ServoMoveEnd sent.")
             except Exception as e:  # noqa: BLE001
                 print(f"ServoMoveEnd failed: {e}")
 
     summarize(periods_ms, rpc_ms, wake_late_ms, f"{probe_name} @ cmd_t={cmd_t * 1000:.1f} ms, load={load}")
+    if gripper_load:
+        gripper_rpc = gripper_stats["rpc_ms"]
+        print(
+            f"  gripper calls: {gripper_stats['calls']}, errors: {gripper_stats['errors']}, "
+            f"rpc p95: {pct(gripper_rpc, 95):.2f} ms, max: "
+            f"{max(gripper_rpc) if gripper_rpc else float('nan'):.2f} ms"
+        )
     over2 = sum(1 for v in periods_ms if v > cmd_t * 1000.0 + 2.0)
     over5 = sum(1 for v in periods_ms if v > cmd_t * 1000.0 + 5.0)
     print(f"  ticks: {len(periods_ms)}, period > cmd_t+2ms: {over2} ({100.0 * over2 / max(1, len(periods_ms)):.1f}%), "

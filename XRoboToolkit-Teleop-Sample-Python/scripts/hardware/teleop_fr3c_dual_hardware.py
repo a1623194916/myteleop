@@ -15,14 +15,12 @@ release to hold the current pose. Homing is ignored while that arm's grip is
 held, so it can never trigger mid-teleoperation.
 
 End-effector control runs in a separate thread per arm and does NOT require
-GRIP takeover:
-  - left trigger  -> left gripper closure (analog: 0 = open, 1 = closed)
-  - right trigger -> right gripper closure (analog)
+GRIP takeover.  A trigger rising edge toggles each gripper between open and
+closed; the configured thumb-stick-click is an optional second toggle input.
 
 MoveGripper is a non-blocking call: the RPC returns immediately and the
-controller executes the move in the background. Commanded targets are only
-sent when the mapped position changes by >= --gripper-min-change %, so the
-trigger is effectively smooth and non-blocking (see Fr3cVrGripperController).
+controller executes the move in the background. The edge-driven controller
+sends one target per press and never streams trigger noise into the gripper.
 
 Data collection: pressing the right-hand controller's A button sends a light
 START/STOP command to the Jetson record server (192.168.5.27:8766 by default),
@@ -41,6 +39,7 @@ import tyro
 
 PICO_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_URDF = str(PICO_ROOT / "fr3c_assets/fr3c_teleop.urdf")
+DEFAULT_CONFIG = str(Path(__file__).resolve().parents[2] / "configs/fr3c_teleop.yaml")
 DEFAULT_INITIAL_JOINT_DEG = [0.0, -90.0, 51.5708, -51.5708, 270.0, 0.0]
 
 LEFT_ROBOT_IP = "192.168.5.22"
@@ -54,16 +53,17 @@ DEFAULT_HOME_RIGHT_DEG = [66.248, -91.981, 44.815, -51.790, 271.275, -32.616]
 
 
 def main(
-    left_robot_ip: str = LEFT_ROBOT_IP,
-    right_robot_ip: str = RIGHT_ROBOT_IP,
+    left_robot_ip: str | None = None,
+    right_robot_ip: str | None = None,
     robot_urdf_path: str = DEFAULT_URDF,
     initial_joints_deg: list[float] = DEFAULT_INITIAL_JOINT_DEG,
     scale_factor: float = 1.0,
     cmd_t: float = 0.01,
-    smooth_tau_ms: float = 40.0,
-    max_joint_step_deg: float = 1.0,
-    input_min_cutoff_hz: float = 2.0,
-    input_beta: float = 0.02,
+    servo_transport: str = "udp",
+    smooth_tau_ms: float = 60.0,
+    max_joint_step_deg: float = 0.30,
+    input_min_cutoff_hz: float = 1.5,
+    input_beta: float = 0.08,
     position_deadband_mm: float = 1.5,
     rotation_deadband_deg: float = 0.5,
     home_button_left: str = "Y",
@@ -74,21 +74,29 @@ def main(
     reset: bool = False,
     # Parallel grippers (BOTH arms)
     gripper_index: int = 1,
-    gripper_velocity: int = 20,
+    gripper_velocity: int = 100,
     gripper_force: int = 20,
+    gripper_open_force: int = 100,
+    gripper_force_limit_n: float = 3.0,
     gripper_trigger_threshold: float = 0.05,
     gripper_min_change: float = 1.0,
     gripper_min_interval_s: float = 0.15,
     gripper_motion_gate: bool = False,
     gripper_max_time_ms: int = 5000,
-    gripper_closed_percent: int = 97,
+    gripper_closed_percent: int = 90,
+    gripper_open_percent: int = 0,
+    gripper_toggle_button_left: str | None = "left_axis_click",
+    gripper_toggle_button_right: str | None = "right_axis_click",
     activate_gripper: bool = True,
     # End-effector polling loop
-    end_effector_hz: float = 20.0,
+    end_effector_hz: float = 50.0,
+    dual_phase_offset_s: float | None = None,
     # Remote recording (A button -> controls the Jetson record server)
     record_server_host: str = "192.168.5.27",
     record_server_port: int = 8766,
     record_task: str = "fr3c_dual",
+    debug_csv_dir: str | None = None,
+    config_path: str = DEFAULT_CONFIG,
 ):
     """
     Run dual-arm FR3C teleoperation on real hardware.
@@ -101,7 +109,7 @@ def main(
         scale_factor: Controller motion gain (1.0 = 1:1).
         cmd_t: ServoJ command period in seconds (0.008 - 0.016).
         smooth_tau_ms: Command trajectory time constant (ms).
-        max_joint_step_deg: Hard cap per servo tick (deg).
+        max_joint_step_deg: Hard cap per servo tick (deg), default 0.30.
         input_min_cutoff_hz / input_beta: One Euro filter tuning for XR deltas.
         position_deadband_mm / rotation_deadband_deg: controller deadbands.
         home_button_left / home_button_right: XR buttons held to glide the
@@ -112,11 +120,10 @@ def main(
         home_joint_speed_dps: Bounded joint speed (deg/s) while homing.
         gripper_index / gripper_velocity / gripper_force / gripper_max_time_ms:
             Fairino gripper command parameters (shared by both arms). The
-            trigger is a true ANALOG slider: trigger travel maps linearly to
-            closure and short max_time segments make the gripper follow the
-            finger continuously.
-        gripper_trigger_threshold / gripper_min_change / gripper_closed_percent:
-            Trigger->closure mapping (0=open, closed_percent = max close).
+            force value is the Fairino SDK's 0..100 percentage, not Newtons.
+        gripper_toggle_button_left / gripper_toggle_button_right:
+            optional rising-edge buttons that toggle the corresponding gripper;
+            the corresponding trigger is also an edge toggle.
         activate_gripper: ActGripper reset+activate after the servo streams
             are up (the servo start latches fault 8-1 once; activating after
             it is cleared is what makes the activation stick).
@@ -126,12 +133,69 @@ def main(
             Otherwise the right-hand A button sends START/STOP commands there;
             images + robot states are recorded on the Jetson (no image stream).
         record_task: Dataset task name (=the subfolder recorded on the Jetson).
+        debug_csv_dir: Optional directory for left/right JSONL debug logs.
     """
     import gc
     import os
     import sys
     import threading
     import time
+
+    from xrobotoolkit_teleop.hardware.fr3c_config import load_config
+
+    config = load_config(config_path, "dual")
+    left_robot_ip = (
+        left_robot_ip
+        if left_robot_ip is not None
+        else config.get("left_robot_ip", LEFT_ROBOT_IP)
+    )
+    right_robot_ip = (
+        right_robot_ip
+        if right_robot_ip is not None
+        else config.get("right_robot_ip", RIGHT_ROBOT_IP)
+    )
+    robot_urdf_path = config.get("robot_urdf_path", robot_urdf_path)
+    initial_joints_deg = config.get("initial_joints_deg", initial_joints_deg)
+    if not Path(robot_urdf_path).is_absolute():
+        robot_urdf_path = str(PICO_ROOT / robot_urdf_path)
+    scale_factor = config.get("scale_factor", scale_factor)
+    cmd_t = config.get("cmd_t", cmd_t)
+    servo_transport = config.get("servo_transport", servo_transport)
+    smooth_tau_ms = config.get("smooth_tau_ms", smooth_tau_ms)
+    max_joint_step_deg = config.get("max_joint_step_deg", max_joint_step_deg)
+    input_min_cutoff_hz = config.get("input_min_cutoff_hz", input_min_cutoff_hz)
+    input_beta = config.get("input_beta", input_beta)
+    position_deadband_mm = config.get("position_deadband_mm", position_deadband_mm)
+    rotation_deadband_deg = config.get("rotation_deadband_deg", rotation_deadband_deg)
+    home_button_left = config.get("home_button_left", home_button_left)
+    home_button_right = config.get("home_button_right", home_button_right)
+    home_joint_speed_dps = config.get("home_joint_speed_dps", home_joint_speed_dps)
+    home_q_left_deg = config.get("home_q_left_deg", home_q_left_deg)
+    home_q_right_deg = config.get("home_q_right_deg", home_q_right_deg)
+    gripper_index = config.get("gripper_index", gripper_index)
+    gripper_velocity = config.get("gripper_velocity", gripper_velocity)
+    gripper_force = config.get("gripper_force_percent", gripper_force)
+    gripper_open_force = config.get("gripper_open_force_percent", gripper_open_force)
+    gripper_trigger_threshold = config.get("gripper_trigger_threshold", gripper_trigger_threshold)
+    gripper_min_change = config.get("gripper_min_change", gripper_min_change)
+    gripper_min_interval_s = config.get("gripper_min_interval_s", gripper_min_interval_s)
+    gripper_max_time_ms = config.get("gripper_max_time_ms", gripper_max_time_ms)
+    gripper_closed_percent = config.get("gripper_closed_percent", gripper_closed_percent)
+    gripper_open_percent = config.get("gripper_open_percent", gripper_open_percent)
+    gripper_toggle_button_left = config.get("gripper_toggle_button_left", gripper_toggle_button_left)
+    gripper_toggle_button_right = config.get("gripper_toggle_button_right", gripper_toggle_button_right)
+    activate_gripper = config.get("activate_gripper", activate_gripper)
+    end_effector_hz = config.get("end_effector_hz", end_effector_hz)
+    dual_phase_offset_s = config.get("dual_phase_offset_s", dual_phase_offset_s)
+    if dual_phase_offset_s is None:
+        dual_phase_offset_s = cmd_t / 2.0
+    dual_phase_offset_s = float(dual_phase_offset_s)
+    if not 0.0 <= dual_phase_offset_s < cmd_t:
+        raise ValueError("dual_phase_offset_s must satisfy 0 <= offset < cmd_t")
+    record_server_host = config.get("record_server_host", record_server_host)
+    record_server_port = config.get("record_server_port", record_server_port)
+    record_task = config.get("record_task", record_task)
+    debug_csv_dir = config.get("debug_csv_dir", debug_csv_dir) or debug_csv_dir
 
     if str(PICO_ROOT) not in sys.path:
         sys.path.insert(0, str(PICO_ROOT))
@@ -151,6 +215,7 @@ def main(
         initial_joint_deg=initial_joints_deg,
         scale_factor=scale_factor,
         cmd_t=cmd_t,
+        servo_transport=servo_transport,
         smooth_tau_s=smooth_tau_ms / 1000.0,
         max_joint_step_deg=max_joint_step_deg,
         input_min_cutoff_hz=input_min_cutoff_hz,
@@ -159,11 +224,15 @@ def main(
         rotation_deadband_deg=rotation_deadband_deg,
         home_joint_speed_dps=home_joint_speed_dps,
     )
+    debug_dir = Path(debug_csv_dir) if debug_csv_dir else None
+    if debug_dir:
+        debug_dir.mkdir(parents=True, exist_ok=True)
     left_controller = Fr3cTeleopController(
         robot_ip=left_robot_ip,
         controller_side="left",
         home_button=home_button_left,
         home_q_deg=home_q_left_deg,
+        debug_csv_path=str(debug_dir / "left.jsonl") if debug_dir else None,
         **arm_kwargs,
     )
     right_controller = Fr3cTeleopController(
@@ -171,7 +240,13 @@ def main(
         controller_side="right",
         home_button=home_button_right,
         home_q_deg=home_q_right_deg,
+        debug_csv_path=str(debug_dir / "right.jsonl") if debug_dir else None,
         **arm_kwargs,
+    )
+    print(
+        "Dual arm routing: left_controller -> left arm, "
+        "right_controller -> right arm; "
+        f"ServoJ={servo_transport}; phase offset={dual_phase_offset_s * 1000.0:.1f} ms"
     )
 
     # Move the startup object graph out of the generational GC scans.
@@ -199,7 +274,7 @@ def main(
         robot=left_controller.robot,
         controller_side="left",
         trigger_threshold=gripper_trigger_threshold,
-        open_position_percent=0.0,
+        open_position_percent=float(gripper_open_percent),
         closed_position_percent=float(gripper_closed_percent),
         min_position_change_percent=gripper_min_change,
         min_command_interval_s=gripper_min_interval_s,
@@ -207,14 +282,18 @@ def main(
         gripper_index=gripper_index,
         velocity=gripper_velocity,
         force=gripper_force,
+        open_force=gripper_open_force,
         max_time_ms=gripper_max_time_ms,
+        toggle_button=gripper_toggle_button_left,
+        toggle_debounce_s=float(config.get("gripper_toggle_debounce_ms", 180.0)) / 1000.0,
+        debug_logger=left_controller.debug_logger,
     )
     gripper_right = Fr3cVrGripperController(
         xr_client=xr_client,
         robot=right_controller.robot,
         controller_side="right",
         trigger_threshold=gripper_trigger_threshold,
-        open_position_percent=0.0,
+        open_position_percent=float(gripper_open_percent),
         closed_position_percent=float(gripper_closed_percent),
         min_position_change_percent=gripper_min_change,
         min_command_interval_s=gripper_min_interval_s,
@@ -222,10 +301,24 @@ def main(
         gripper_index=gripper_index,
         velocity=gripper_velocity,
         force=gripper_force,
+        open_force=gripper_open_force,
         max_time_ms=gripper_max_time_ms,
+        toggle_button=gripper_toggle_button_right,
+        toggle_debounce_s=float(config.get("gripper_toggle_debounce_ms", 180.0)) / 1000.0,
+        debug_logger=right_controller.debug_logger,
     )
     if activate_gripper:
-        print("Gripper activation deferred until after the servo streams are up.")
+        print("Clearing stale gripper warnings before teleoperation...")
+        try:
+            left_controller.robot.clear_gripper_warning(index=gripper_index)
+            right_controller.robot.clear_gripper_warning(index=gripper_index)
+        except Exception as e:
+            print(f"Gripper warning clear failed; aborting startup: {e}")
+            left_controller.close()
+            right_controller.close()
+            xr_client.close()
+            return
+        print("Gripper warnings cleared; activation deferred until ServoJ is up.")
 
 # ---- Remote collection (optional) ----
     # 遥操机只把 A 键转成 START/STOP 指令;  图像/状态都在 Jetson 本机落盘。
@@ -275,18 +368,33 @@ def main(
     if record_client is not None:
         threading.Thread(target=forward_state_loop, daemon=True, name="fwd-state").start()
 
-    threads = []
-    for ctrl, label in ((left_controller, "left"), (right_controller, "right")):
-        threads.append(
-            threading.Thread(
-                target=ctrl.run_arm_thread, args=(stop_signal,), name=f"{label}-arm-controller"
-            )
-        )
-        threads.append(
-            threading.Thread(
-                target=ctrl.run_ik_thread, args=(stop_signal,), name=f"{label}-ik"
-            )
-        )
+    # Spread the two ServoJ sends and two Placo solves across the command
+    # period. With the default 10 ms period they start at 0, 2.5, 5 and
+    # 7.5 ms, avoiding four-way GIL contention and paired UDP bursts.
+    ik_phase_offset_s = cmd_t / 4.0
+    right_ik_phase_s = (dual_phase_offset_s + ik_phase_offset_s) % cmd_t
+    threads = [
+        threading.Thread(
+            target=left_controller.run_arm_thread,
+            args=(stop_signal, 0.0),
+            name="left-arm-controller",
+        ),
+        threading.Thread(
+            target=right_controller.run_arm_thread,
+            args=(stop_signal, dual_phase_offset_s),
+            name="right-arm-controller",
+        ),
+        threading.Thread(
+            target=left_controller.run_ik_thread,
+            args=(stop_signal, ik_phase_offset_s),
+            name="left-ik",
+        ),
+        threading.Thread(
+            target=right_controller.run_ik_thread,
+            args=(stop_signal, right_ik_phase_s),
+            name="right-ik",
+        ),
+    ]
 
     for t in threads:
         t.start()
@@ -296,26 +404,15 @@ def main(
         # latches drive fault 8-1 once, the stream's recovery clears it (which
         # also DEACTIVATES the grippers as a ResetAllError side effect), so
         # activating afterwards is the only order in which the activation sticks.
-        print("Waiting for servo streams to go fault-free before gripper activation...")
-        deadline = time.monotonic() + 8.0
-        ready = False
-        while time.monotonic() < deadline:
-            ready = True
-            for ctrl in (left_controller, right_controller):
-                try:
-                    main_code, _sub = ctrl.robot.get_robot_error_code()
-                except Exception as e:
-                    print(f"GetRobotErrorCode at startup failed: {e}")
-                    ready = False
-                    break
-                if main_code != 0:
-                    ready = False
-                    break
-            if ready:
+        print("Waiting for the first ServoJ command from both arms...")
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline and not all(
+            ctrl.robot.servo_ready for ctrl in (left_controller, right_controller)
+        ):
+            if stop_signal.wait(0.05):
                 break
-            time.sleep(0.3)
-        if not ready:
-            print("Aborting: arms not fault-free after servo start.")
+        if not all(ctrl.robot.servo_ready for ctrl in (left_controller, right_controller)):
+            print("Aborting: one or both arms did not send a ServoJ command.")
             stop_signal.set()
             for t in threads:
                 t.join(timeout=2.0)
@@ -324,6 +421,13 @@ def main(
             xr_client.close()
             return
 
+        # ServoMoveStart may latch drive fault 8-1 on this firmware.  Clear
+        # it while ServoJ is still paused, before any ActGripper RPC.
+        for ctrl in (left_controller, right_controller):
+            ctrl.robot.ensure_fault_free()
+
+        # Gripper activation uses each robot SDK's primary XML-RPC connection.
+        # ServoJ uses UDP and remains continuous during activation.
         t_start = time.monotonic()
 
         def _activate(grip, label):
@@ -333,13 +437,10 @@ def main(
                 print(f"{label} gripper activation failed: {e}")
 
         act_threads = []
-        for grip, ctrl, label in (
-            (gripper_left, left_controller, "left"),
-            (gripper_right, right_controller, "right"),
+        for grip, label in (
+            (gripper_left, "left"),
+            (gripper_right, "right"),
         ):
-            if ctrl.robot.gripper_active(gripper_index):
-                print(f"{label} gripper already active; skipping activation.")
-                continue
             act_threads.append(
                 threading.Thread(target=_activate, args=(grip, label),
                                  name=f"{label}-gripper-activate")
@@ -350,19 +451,31 @@ def main(
             t.join()
         print(f"Gripper startup done in {time.monotonic() - t_start:.1f}s.")
         time.sleep(0.5)  # settle: surface any fault the activation strokes caused
-        for ctrl in (left_controller, right_controller):
-            # If a stroke tripped 8-1, clear it; the deactivated gripper is
-            # brought back by its own control thread (single ownership).
-            ctrl.robot.ensure_fault_free()
-
-    for grip, lab_ in (
-        (gripper_left, "left-gripper"),
-        (gripper_right, "right-gripper"),
-    ):
-        threads.append(
-            threading.Thread(target=grip.run, args=(stop_signal, end_effector_hz), name=lab_)
-        )
-        threads[-1].start()
+        for ctrl, label in (
+            (left_controller, "left"),
+            (right_controller, "right"),
+        ):
+            # CNDE's gripper_active field is not trustworthy on TG-9801.  Only
+            # clear a fault if one is actually present; never re-activate based
+            # on that field before ServoJ resumes.
+            if ctrl.robot.latched_fault_code()[0] != 0:
+                print(f"{label} gripper startup latched a robot fault; clearing before ServoJ.")
+                ctrl.robot.ensure_fault_free()
+        for grip, label in ((gripper_left, "left"), (gripper_right, "right")):
+            try:
+                grip.initialize_idle()
+                print(f"{label} gripper ready (startup move skipped).")
+            except Exception as e:
+                print(f"{label} gripper startup preparation failed: {e}")
+    if activate_gripper:
+        for grip, lab_ in (
+            (gripper_left, "left-gripper"),
+            (gripper_right, "right-gripper"),
+        ):
+            threads.append(
+                threading.Thread(target=grip.run, args=(stop_signal, end_effector_hz), name=lab_)
+            )
+            threads[-1].start()
 
     # A 键(右手柄)按下 -> 通知 Jetson 采集服务开始/结束; 无记录时自然循环.
     prev_a = False

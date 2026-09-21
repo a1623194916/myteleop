@@ -85,6 +85,7 @@ def main():
         closed_position_percent=97.0,
         min_position_change_percent=args.min_change,
         min_command_interval_s=args.interval,
+        trigger_toggle=False,
         recover_on_any_error=True,
     )
 

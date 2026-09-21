@@ -14,38 +14,7 @@ cd XRoboToolkit-Teleop-Sample-Python
 source .venv/bin/activate
 cd /home/u22/kyz/pico_software
 python test_pico_xrt_pipeline.py
-# FR3C 单臂遥操（MuJoCo 仿真）
 
-## 资产生成（一次性）
-
-```bash
-cd /home/u22/kyz/pico_software
-XRoboToolkit-Teleop-Sample-Python/.venv/bin/python fr3c_assets/build_fr3c_assets.py
-```
-
-## 假输入无头测试（推荐先跑）
-
-```bash
-cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake --headless-duration 10
-```
-
-## 带可视化窗口运行
-
-```bash
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source fake
-```
-
-## 连接真实 PICO（先启动 XRoboToolkit PC Service 并连接 PICO）
-
-```bash
-export DISPLAY=:1
-PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_mujoco.py --input-source pico
-```
-
-## 操作方式
-
-按住右侧 GRIP 接管机械臂（末端跟随手柄 delta 位姿），松开 GRIP 则停在当前位置。与官方 UR5e 示例的控制方式一致。
 
 # FR3C 双臂遥操（MuJoCo 仿真）
 
@@ -101,64 +70,49 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_fr3c_dual_mujoco.py --in
 
 右手柄 GRIP 接管右臂，左手柄 GRIP 接管左臂，各自独立跟随手柄 delta 位姿。
 
-# FR3C 单臂真机遥操（Fairino SDK ServoJ 流）
+
+# FR3C 真机遥操（单臂/双臂，UDP ServoJ）
+
+## 机械臂 IP 与手柄映射
+
+- `192.168.5.22` = 左臂 = 左手柄
+- `192.168.5.23` = 右臂 = 右手柄
+
+单臂启动命令建议显式写 `--robot-ip` 和 `--controller-side`；其余运行参数默认从 `configs/fr3c_teleop.yaml` 的 `single` 配置读取，可用 `--config-path` 切换配置文件。
 
 ## 前置
 
 - XRoboToolkit PC Service 已启动、PICO 已连接
-- FR3C 控制器 IP 可达（默认 192.168.5.23，`--robot-ip` 可改）
-- 遥操 venv 能 `import Robot`（自动找 fair_ws 下的 `fairino-python-sdk-v2.2.9_robot3.9.9/linux/fairino`）
+- 两台 FR3C 控制器 IP 可达：左 `192.168.5.22`（左手柄 GRIP 接管）、右 `192.168.5.23`（右手柄 GRIP 接管）
+- 遥操 venv 能 `import Robot`
+- 控制器固件已升到 3.9.9，官方 SDK 已用 `fair_ws/fairino-python-sdk-v2.2.9_robot3.9.9`（git tag `v2.2.9_robot_v3.9.9`）替换，`interface/fr3c.py` 的 SDK 加载器已把它放在首位，`import Robot` 直接用新版（CNDE + XML-RPC）。
+- 两台控制器侧均已配置 HKV TG-9801 机械夹爪（控制器末端 485 桥接，`MoveGripper` 直接驱动）。ServoJ 使用 UDP 实时流；夹爪线程复用厂商 SDK 的主 XML-RPC 连接，UDP ServoJ 不受该 RPC 锁影响。故障由 ServoJ 路径清除后，夹爪线程会在后台重新激活夹爪，不会在 ServoJ 线程里执行多秒激活调用。若夹爪命令仍超时，需在网页示教器里检查夹爪品牌、波特率和末端 485 接线。
+- trigger/摇杆按键采用**上升沿切换**：第一次按下闭合到 90%，下一次按下打开；松开不会反复发送目标。这样夹爪动作期间机械臂仍按自己的 ServoJ 周期运行，避免手指抖动把夹爪 RPC 变成高频负载。
 
-## 启动
+## 单臂真机遥操
+
+### 遥操右臂
 
 ```bash
 cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 export DISPLAY=:1
-PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py --robot-ip 192.168.5.22 \
---position-deadband-mm 5.0 \
---rotation-deadband-deg 1.0
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py \
+  --robot-ip 192.168.5.23 \
+  --controller-side right \
+  --debug-csv-path /tmp/fr3c_gripper_toggle.jsonl
 ```
 
-真机模式默认不开 MuJoCo 镜像窗口（同进程渲染会与 ServoJ 伺服线程抢 GIL，扰动下发节拍造成低频抖动，详见 scripts/hardware/diag_fr3c_servo_timing.py 的对照实验）；需要查看时加 `--visualize-mujoco`。
+### 遥操左臂
 
-手柄默认按机器人 IP 自动选择：`192.168.5.22` 使用左手柄，`192.168.5.23` 使用右手柄。可用 `--controller-side left` 或 `--controller-side right` 强制覆盖。
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_hardware.py \
+  --robot-ip 192.168.5.22 \
+  --controller-side left
+```
 
-可选参数：`--reset`（先 MoveJ 到初始位姿，默认与仿真 home 一致的工具朝下位姿，`--initial-joints-deg 0 -90 51.57 -51.57 270 0` 可改）、`--cmd-t 0.01`（ServoJ 周期；诊断若显示迟到尾部偏肥可试 0.014-0.016）、`--scale-factor 1.0`、`--smooth-tau-ms 40`（指令轨迹时间常数，按真实 dt 指数逼近，tick 抖动只改相位不改速度；越大越稳越滞后）、`--max-joint-step-deg 1.0`（每周期关节步长上限）、`--input-min-cutoff-hz 2.0` / `--input-beta 0.02`（XR 输入 One Euro 滤波：静止强低通去手抖、运动时自适应放宽几乎无滞后）、`--no-visualize-mujoco` 已由默认关闭取代、`--visualize-placo`（浏览器看 IK）。
-
-## 平滑栈说明（2026-08 重构）
-
-- **XR 输入**：One Euro Filter（`fr3c_control_utils.OneEuroFilter`）替代固定 alpha EMA——静止时截止 2Hz 压手抖，快速运动时随速度自适应放宽，滞后远小于原双层 EMA。
-- **指令轨迹**：`JointCommandTrajectory` 混合系数改为 `1-exp(-dt/tau)`（dt=真实流逝时间），伺服 tick 被 GIL/RPC 拖慢时指令速度不再跳变（不规则 tick 与均匀 tick 在相同总时长下轨迹逐点一致，有单测覆盖）。
-- **发送节拍**：`AbsoluteDeadlinePacer` 绝对 deadline 调度（RPC 延迟吃掉的是空闲而非下一拍），超期一拍自动 resync 防止补发旧点；`Fr3cController.last_send_late_s` 暴露每拍迟到量。
-- **进程隔离**：`--visualize-mujoco` 的渲染移入独立子进程（`MirrorProcess`，共享内存发布实测关节角，主进程只做 30Hz 拷贝）；伺服线程尽力提升 SCHED_FIFO（无权限时静默跳过）；`sys.setswitchinterval(0.001)` + `gc.freeze()` 降低 GIL 停顿。
-- **时序诊断**：`scripts/hardware/diag_fr3c_servo_timing.py`——`--no-move` 只读探针测发送周期/RPC 分布；`--load mirror` 复现旧版同进程渲染的干扰作对照；`--mock` 离线自检。真机上先跑 `--no-move` 与 `--no-move --load mirror` 对比 p99：尾部变肥即客户端调度问题，干净则瓶颈在控制器侧（只能加大 cmdT 或等固件开放 filterT/gain）。
-
-## 操作方式与安全
-
-- 按住自动选择或显式指定手柄的 GRIP 接管，末端跟随手柄 delta 位姿；松开保持不动。
-- 伺服错误码 14 = "接口执行失败"：控制器有锁存故障（典型为会话启动时锁存的伺服驱动器 8-1 "Runaway fault"）时拒绝一切运动指令。程序会自动查故障码、ResetAllError 清除并继续推流（最多 10 轮、每 0.5s 一轮），清障后自动重新激活被去激活的夹爪；确认无故障的 14 才按超速处理加大 cmdT。恢复不了会快速结束伺服会话并给出明确提示。
-- 启动后立即可以急停：Ctrl+C 会 ServoMoveEnd + 断链。
-
-## FR3C 平滑优化路线（ServoJ 低频抖动排查结论）
-
-抖动主因 = 下发节拍抖（XML-RPC/HTTP 往返 + 同进程 GIL 竞争）+ 控制器侧平滑参数被锁（ServoJ 的 filterT/gain 官方标注"暂不开放"，acc/vel 同样）。平滑只能客户端做。按性价比：
-
-1. `--visualize-mujoco` 已默认关闭（同进程渲染抢 GIL）；要看镜像再显式打开。
-2. 时序诊断：`scripts/hardware/diag_fr3c_servo_timing.py`（--no-move 只读探针测节拍/RPC 分布，--load mirror 复现 GIL 干扰，--mock 离线自检）。
-3. 客户端改造：EMA 改按时间常数（alpha=1-exp(-dt/tau)）；XR 输入换 One Euro Filter；伺服循环绝对节拍 + cmdT 试 12-16ms。
-4. 结构改造：MuJoCo 镜像/IK 与伺服线程隔离（独立进程），伺服进程 gc.disable + CPU 亲和。
-5. SDK/固件升级（治本）：官方 [fairino-python-sdk](https://github.com/FAIR-INNOVATION/fairino-python-sdk) 新版（V2.2.x，适配固件 V3.9.x）给 ServoJ/ServoMoveStart/ServoMoveEnd 加了 `cmdType=1` UDP 透传（控制器 20007 端口，免 HTTP 往返，发一次几十微秒），另有 ServoJMultiPos 单次批量 ≤10 点、状态反馈换 20005/CNDE 且周期可设 8ms。**filterT/gain 在最新版仍未开放**。注意新 SDK 无旧固件回退（CNDE 连不上则全部调用失败），需把控制器固件升到 V3.9.x；升级前先问法奥 V3.9.9 是否开放 filterT/gain。UDP 模式下错误码走 SetUDPCmdRpyCallback 异步回传，err14 自动降速逻辑要改为监听回调。
-
-# FR3C 双臂真机遥操（双夹爪）
-
-## 前置
-
-- XRoboToolkit PC Service 已启动、PICO 已连接
-- 两台 FR3C 控制器 IP 可达：左 `192.168.5.22`（左手柄 GRIP 接管 + 左 trigger 控左夹爪）、右 `192.168.5.23`（右手柄接管 + 右 trigger 控右夹爪）
-- 遥操 venv 能 `import Robot`
-- 控制器固件已升到 3.9.9，官方 SDK 已用 `fair_ws/fairino-python-sdk-v2.2.9_robot3.9.9`（git tag `v2.2.9_robot_v3.9.9`）替换，`interface/fr3c.py` 的 SDK 加载器已把它放在首位，`import Robot` 直接用新版（CNDE + XML-RPC）。
-- 两台控制器侧均已配置 HKV TG-9801 机械夹爪（控制器末端 485 桥接，`MoveGripper` 直接驱动）。**已知固件层问题**：夹爪的 485 位置反馈通道不通（`GetGripperCurPosition`/CNDE `gripper_position` 恒 0 或间歇掉 0，`GetGripperActivateStatus` 恒未激活，`ActGripper` 为空操作），因此每次运动结束时控制器的运动监督校验失败 → 锁存伺服驱动故障 8-1（"Runaway fault"）→ 下一条 `MoveGripper` 被 73 拒绝。程序已在夹爪线程内反应式清障（通过 8ms 状态包监测，出现即 ResetAllError，~0.1s 生效），配合**连续重定目标流**（关闭 motion_done 门控，运动中直接改目标，不给"完成校验"触发的机会），实测整段滑钮扫描 0 拒绝、夹爪连续跟随。若在网页示教器里把夹爪品牌/波特率配置修正、反馈通道恢复，跟随会更干净（不再需要反应式清障）。
-- trigger 是**真正的模拟量滑钮**：扳机行程线性映射闭合度（0=全开，97% 上限），1% 步进、0.15s 间隔连续下发，夹爪实时跟随手指；松开自动回全开。
+单臂命令默认使用 YAML 中的 `servo_transport: udp`，用于低延迟 ServoJ 实时流。
 
 ### 不用手柄：屏幕滑块直接控制夹爪
 
@@ -173,15 +127,27 @@ PYTHONPATH=. .venv/bin/python scripts/hardware/gripper_slider_hardware.py
 弹出窗口里左右两条滑块（0=全开，100=闭合到 97%），拖动即跟随，关窗退出。
 该模式**手臂完全空闲**（不起伺服会话），只有夹爪会动。
 沿用与遥操完全相同的跟随控制器（含反应式 8-1 清障）。
-- **伺服故障 8-1**（官方附录3：伺服驱动器 "Runaway fault"，关节位置失控保护）：每次伺服会话启动瞬间会锁存一次，之后一切运动指令（ServoJ/ActGripper/MoveGripper）被错误码 14 拒绝，示教器不弹阻塞告警只在故障列表里。程序自动 ResetAllError 清除并续流（实测一次即清）；注意 ResetAllError 会**顺带去激活夹爪**，程序会在清障后自动后台重新激活夹爪。
-- SDK 没有专门的高频/连续夹爪伺服接口（无 GripperJogJ/夹爪 move-control），夹爪遥操只能用新 SDK 的非阻塞 `MoveGripper`（block=1）流式下发 + `GetGripperMotionDone` 门控 + 实时态 `GetGripperCurPosition` 读取。因此闭合最深默认只发到 97%（不发 100% 全闭合），留 3% 余量防空手顶死锁 8-1。
+- **伺服故障 8-1**（官方附录 3：伺服驱动器 "Runaway fault"，关节位置失控保护）：程序通过状态包识别并由 ServoJ 路径清除；清除后的夹爪重新激活在夹爪线程执行，不会阻塞机械臂发送循环。若故障无法清除，ServoJ 会停止并打印故障次数，需先处理示教器报警。
+- SDK 没有专门的高频/连续夹爪伺服接口（无 GripperJogJ/夹爪 move-control），夹爪遥操通过厂商 SDK 的主 XML-RPC 连接按边沿下发非阻塞 `MoveGripper`（block=1）。闭合默认发到 SDK 示例采用的 90%，避免逼近机械限位后因反馈无法到达目标而超时。
 
-## 启动
+## 双臂真机启动
+
+双臂的 ServoJ 均使用 UDP。默认 10ms 周期内，左 ServoJ、左 IK、右 ServoJ、右 IK 分别错开到 0、2.5、5、7.5ms，避免四条循环同相争用 Python GIL 并成对突发发送 UDP 包。启动日志应显示 `ServoJ transport: udp (send-only)` 两次，以及 `phase offset=5.0 ms`。
 
 ```bash
 cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 export DISPLAY=:1
 PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_dual_hardware.py
+```
+
+推荐显式写出两台控制器 IP，避免现场接线或配置变化时连错：
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_dual_hardware.py \
+  --left-robot-ip 192.168.5.22 \
+  --right-robot-ip 192.168.5.23
 ```
 
 先用假 PICO 输入校验 trigger→夹爪映射（不走真机）：
@@ -199,15 +165,18 @@ PYTHONPATH=. .venv/bin/python scripts/hardware/test_fr3c_gripper_trigger_mapping
 - 每臂各跑一个独立 `Fr3cTeleopController`（Placo IK + ServoJ 流）：左手柄 GRIP 接管左臂、右手柄 GRIP 接管右臂，可同时、可独立，松开各自保持不动。
 - **回初始位姿**：按住左手柄 **Y** → 左臂、按住右手柄 **B** → 右臂，以限速（默认 60°/s，`--home-joint-speed-dps` 可调）平滑回到固定位姿（`DEFAULT_HOME_*_DEG`，2026-09-18 从真机实测捕获；可用 `--home-q-left-deg`/`--home-q-right-deg` 覆盖），松开按键停在当前位置。GRIP 按住时回位键失效，绝不会在遥操中把臂拽走。
 - 末端控制独立于 GRIP 接管（手臂未接管时也能操作）：
-  - **左 trigger** → 左夹爪模拟量映射：扳机深度 → 闭合程度（0=全开，闭合上限默认 97%，防空手顶死锁错误），按得越快闭合越快；松开自动回全开。目标变化 ≥ `--gripper-min-change`（默认 2%）才下发 `MoveGripper`。
-  - **右 trigger** → 右夹爪，映射方式完全相同（两夹爪共用同一组 `--gripper-*` 参数）。
+  - **左/右 trigger**：按下沿切换对应夹爪，第一次闭合、下一次打开；持续按住只保持状态。
+  - **左手柄 `left_axis_click`**：按一下左夹爪闭合，再按一下打开。
+  - **右手柄 `right_axis_click`**：按一下右夹爪闭合，再按一下打开。
+  - 夹爪速度默认 `100`，闭合位置默认 `90%`，力参数默认 `20%`；边沿命令由独立夹爪线程限频发送。
 - Ctrl+C：结束两臂伺服会话、断链。
 
 ## 参数要点
 
-- `--left-robot-ip` / `--right-robot-ip`：默认 `192.168.5.22` / `192.168.5.23`（左手柄操作 192.168.5.22）。
+- `--left-robot-ip` / `--right-robot-ip`：分别指定左、右控制器 IP；当前应为 `192.168.5.22` / `192.168.5.23`。
+- `--servo-transport udp`：ServoJ 实时关节指令传输方式，默认从 YAML 读取 `udp`；可用 `xmlrpc` 做链路对比。
 - `--reset`：先 MoveJ 到初始位姿（左右共用同一 home）；默认不加，从当前位姿开始（与 Y/B 回位目标相互独立）。
-- 夹爪（两臂共用）：`--gripper-velocity 20`（闭合速度）、`--gripper-force 20`（力矩）、`--gripper-index 1`、`--activate-gripper`（默认开：启动时先 ResetAllError 清残留错误再 ActGripper 复位+激活，激活后逐臂复查故障）、`--gripper-closed-percent 97`（闭合上限）。
+- 夹爪（两臂共用）：`--gripper-velocity 100`（闭合速度）、`--gripper-force 20`（力矩）、`--gripper-index 1`、`--activate-gripper`（默认开：启动时先 ResetAllError 清残留错误再 ActGripper 复位+激活，激活后逐臂复查故障）、`--gripper-closed-percent 90`（闭合上限）。
 - 回位：`--home-button-left Y` / `--home-button-right B`（传空串禁用该臂）、`--home-q-left-deg` / `--home-q-right-deg`（固定位姿，度）、`--home-joint-speed-dps 60`。
 - 其余平滑/滤波参数与单臂一致：`--cmd-t`、`--smooth-tau-ms`、`--max-joint-step-deg`、`--input-min-cutoff-hz`、`--input-beta`、`--position-deadband-mm`、`--rotation-deadband-deg`、`--scale-factor`。
 
@@ -243,8 +212,16 @@ python record_server.py --record-root /home/nvidia/datasets --port 8766
 cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
 export DISPLAY=:1
 PYTHONPATH=. .venv/bin/python scripts/hardware/teleop_fr3c_dual_hardware.py \
+  --left-robot-ip 192.168.5.22 --right-robot-ip 192.168.5.23 \
   --record-server-host 192.168.5.27 --record-server-port 8766 --record-task fr3c_dual
 ```
+
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+export DISPLAY=:1
+
+PYTHONPATH=. .venv/bin/python \
+  scripts/hardware/teleop_fr3c_hardware.py
+
 
 右手柄 **A 键** 开始/结束采集。原始数据在
 `/home/nvidia/datasets/fr3c_dual/episodes/ep_XXXXX/`：
@@ -315,7 +292,7 @@ Jetson 侧已部署（192.168.5.27:/home/nvidia/orbbec/）：
 /home/nvidia/miniconda3/envs/orbbec/bin/python ~/orbbec/dataset_recorder/record_server.py --video
 ```
 
-头显侧需将 `pico_software/configs/orbbec_video_source.yml`（PANORAMA mono 1280x720@30 contentRatio 1.777778）push 到 `/sdcard/Android/data/com.xrobotoolkit.client/files/video_source.yml`（需 adb/设备就绪）。已在 Jetson 用模拟 PICO 客户端全链路验证：OPEN_CAMERA→NVENC→84-90 AU/3s→ffmpeg 解码通过；ZMQ GET 与 HDF5 采集回归正常。真机待办：Orbbec 相机接入（当前 lsusb 为 0）+ PICO 装 video_source.yml 实看。
+头显侧需将 `pico_software/configs/orbbec_video_source.yml`（PANORAMA mono 1280x720@30 contentRatio 1.777778）push 到 `/sdcard/Android/data/com.xrobotoolkit.client/files/video_source.yml`（需 adb/设备就绪）。已在 Jetson 用模拟 PICO 客户端全链路验证：OPEN_CAMERA→NVENC→84-90 AU/3s→ffmpeg 解码通过；ZMQ GET 与 HDF5 采集回归正常。**2026-09-19 起采集服务器已带 `--video` 常驻运行（13579 监听中），Orbbec 相机 CPC85630003C 已接入**；头显端待办只剩：把 video_source.yml push 进 PICO（任一有 adb 的电脑），头显 XRoboToolkit 客户端里发起视频连接。
 
 # NG01 双臂遥操（MuJoCo 仿真，可行性验证）
 

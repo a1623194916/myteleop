@@ -8,9 +8,46 @@ command stream smooth when tick timing wobbles.
 """
 
 import math
+import json
+import queue
+import threading
 import time
 
 import numpy as np
+
+
+class DebugEventLogger:
+    """Low-overhead JSONL logger for cross-thread teleop diagnostics."""
+
+    def __init__(self, path: str, max_queue_size: int = 20000):
+        self.path = str(path)
+        self._queue = queue.Queue(maxsize=max_queue_size)
+        self.dropped = 0
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._write_loop, name="fr3c-debug-log", daemon=True)
+        self._thread.start()
+
+    def row(self, event: str, **fields):
+        payload = {"t_monotonic": time.monotonic(), "event": event, **fields}
+        try:
+            self._queue.put_nowait(payload)
+        except queue.Full:
+            self.dropped += 1
+
+    def _write_loop(self):
+        with open(self.path, "w", encoding="utf-8") as handle:
+            while not self._stop.is_set() or not self._queue.empty():
+                try:
+                    payload = self._queue.get(timeout=0.2)
+                except queue.Empty:
+                    continue
+                handle.write(json.dumps(payload, separators=(",", ":")) + "\n")
+                if self._queue.qsize() == 0:
+                    handle.flush()
+
+    def close(self):
+        self._stop.set()
+        self._thread.join(timeout=2.0)
 
 
 ROBOT_IP_CONTROLLER_SIDES = {
@@ -120,6 +157,9 @@ class PoseDeltaFilter:
         position_deadband_m: float,
         rotation_deadband_rad: float,
         d_cutoff_hz: float = 1.0,
+        position_jump_limit_m: float = 0.12,
+        position_teleport_limit_m: float = 0.30,
+        default_dt_s: float = 0.01,
     ):
         self.position_filter = OneEuroFilter(3, min_cutoff_hz, beta, d_cutoff_hz)
         self.rotation_filter = OneEuroFilter(3, min_cutoff_hz, beta, d_cutoff_hz)
@@ -129,6 +169,15 @@ class PoseDeltaFilter:
             raise ValueError("rotation_deadband_rad must be non-negative")
         self.position_deadband_m = float(position_deadband_m)
         self.rotation_deadband_rad = float(rotation_deadband_rad)
+        if position_jump_limit_m <= 0.0 or position_teleport_limit_m < position_jump_limit_m:
+            raise ValueError("position jump limits must satisfy 0 < jump <= teleport")
+        if default_dt_s <= 0.0:
+            raise ValueError("default_dt_s must be positive")
+        self.position_jump_limit_m = float(position_jump_limit_m)
+        self.position_teleport_limit_m = float(position_teleport_limit_m)
+        self.default_dt_s = float(default_dt_s)
+        self._last_valid_position: np.ndarray | None = None
+        self._rejected_positions = 0
         self.reset()
 
     def reset(self):
@@ -137,6 +186,13 @@ class PoseDeltaFilter:
         self._output_position = np.zeros(3)
         self._output_rotation = np.zeros(3)
         self._last_timestamp_ns: int | None = None
+        self._last_wall_s: float | None = None
+        # OneEuroFilter only needs a monotonic time base. Keep a local
+        # accumulated clock so an SDK timestamp of zero, a timestamp reset,
+        # or a timestamp from a different clock cannot freeze the filter.
+        self._filter_clock_s = 0.0
+        self._last_valid_position = None
+        self._rejected_positions = 0
 
     @staticmethod
     def _validate_delta(delta: np.ndarray, name: str) -> np.ndarray:
@@ -160,17 +216,68 @@ class PoseDeltaFilter:
     ) -> tuple[np.ndarray, np.ndarray]:
         position = self._validate_delta(position_delta, "position_delta")
         rotation = self._validate_delta(rotation_delta, "rotation_delta")
+        if not np.all(np.isfinite(position)) or not np.all(np.isfinite(rotation)):
+            # Tracking can briefly publish an invalid frame while the headset
+            # relocalises. Hold the last valid command instead of poisoning
+            # the filter state or terminating the IK thread.
+            return self._output_position.copy(), self._output_rotation.copy()
 
-        has_timestamp = timestamp_ns is not None and timestamp_ns > 0
+        has_timestamp = timestamp_ns is not None and int(timestamp_ns) > 0
+        timestamp_ns = int(timestamp_ns) if has_timestamp else None
         if has_timestamp and timestamp_ns == self._last_timestamp_ns:
             return self._output_position.copy(), self._output_rotation.copy()
-        if has_timestamp:
-            self._last_timestamp_ns = timestamp_ns
 
-        # XR timestamps are ns in an arbitrary clock; filter in seconds.
-        stamp_s = (timestamp_ns or 0) * 1e-9
-        filtered_position = self.position_filter.filter(position, stamp_s)
-        filtered_rotation = self.rotation_filter.filter(rotation, stamp_s)
+        # Prefer the XR clock only while it is consecutive and increasing.
+        # The SDK's fake/headless source returns zero, and some runtime paths
+        # reset its epoch; both cases fall back to elapsed local time.
+        now_wall_s = time.monotonic()
+        if (
+            has_timestamp
+            and self._last_timestamp_ns is not None
+            and timestamp_ns > self._last_timestamp_ns
+        ):
+            dt_s = (timestamp_ns - self._last_timestamp_ns) * 1e-9
+        elif self._last_wall_s is not None:
+            dt_s = now_wall_s - self._last_wall_s
+        else:
+            dt_s = self.default_dt_s
+        # Reject unit mistakes (microsecond/millisecond values passed through
+        # an API named ``*_ns``) that would otherwise make the One-Euro alpha
+        # effectively zero and leave the arm looking stuck.
+        if not math.isfinite(dt_s) or dt_s < 1e-4:
+            wall_dt_s = (
+                now_wall_s - self._last_wall_s
+                if self._last_wall_s is not None
+                else self.default_dt_s
+            )
+            dt_s = (
+                wall_dt_s
+                if math.isfinite(wall_dt_s) and wall_dt_s >= 1e-4
+                else self.default_dt_s
+            )
+        self._filter_clock_s += dt_s
+        self._last_wall_s = now_wall_s
+        self._last_timestamp_ns = timestamp_ns if has_timestamp else None
+
+        # Base-station relocalisation can produce a single large position
+        # spike.  Drop impossible teleports and limit merely large samples;
+        # the One-Euro filter should see a physically plausible trajectory.
+        if self._last_valid_position is not None:
+            delta = position - self._last_valid_position
+            distance = float(np.linalg.norm(delta))
+            if distance > self.position_teleport_limit_m:
+                self._rejected_positions += 1
+                if self._rejected_positions <= 3:
+                    return self._output_position.copy(), self._output_rotation.copy()
+            elif distance > self.position_jump_limit_m:
+                position = self._last_valid_position + delta * (self.position_jump_limit_m / distance)
+                self._rejected_positions = 0
+            else:
+                self._rejected_positions = 0
+        self._last_valid_position = position.copy()
+
+        filtered_position = self.position_filter.filter(position, self._filter_clock_s)
+        filtered_rotation = self.rotation_filter.filter(rotation, self._filter_clock_s)
 
         self._output_position = self._apply_soft_deadband(
             filtered_position,
@@ -236,11 +343,10 @@ class AbsoluteDeadlinePacer:
     """Metronomic pacing for the ServoJ stream.
 
     Each ``tick`` sleeps until the next absolute deadline instead of
-    ``period - elapsed`` after the work: the send schedule never accumulates
-    drift, and a tick that overruns (GIL stall, GC, slow RPC) is followed by
-    immediate catch-up rather than pushing every subsequent point later. If
-    the loop falls more than one period behind, the schedule resyncs to avoid
-    bursting stale points.
+    ``period - elapsed`` after the work: the send schedule does not accumulate
+    drift. If a tick overruns (GIL stall, GC, slow RPC), the next deadline is
+    restarted one full period after the actual wake-up so stale points are
+    never emitted in a catch-up burst.
     """
 
     def __init__(self, period_s: float):
@@ -261,17 +367,29 @@ class AbsoluteDeadlinePacer:
         """Sleep until the current deadline; return send lateness in seconds.
 
         Lateness is how far the wake-up happened past the deadline (0 when
-        early). The next deadline always advances by exactly one period.
+        early). After a late wake-up, restart one full period after the actual
+        wake-up so the loop never emits a catch-up burst.
         """
         now = time.monotonic() if now_s is None else now_s
         if self._deadline is None:
             self._deadline = now
-        if now - self._deadline > self.period_s:
-            self._deadline = now  # fell too far behind: resync, do not burst
         late_s = max(0.0, now - self._deadline)
         if now_s is None:
             remaining = self._deadline - now
             if remaining > 0.0:
                 time.sleep(remaining)
-        self._deadline += self.period_s
+                # ``sleep`` may wake late under scheduler/GIL pressure. Use
+                # the actual wake time both for diagnostics and to avoid
+                # scheduling a short catch-up interval after an oversleep.
+                now = time.monotonic()
+                late_s = max(0.0, now - self._deadline)
+        if late_s > 0.0:
+            self._deadline = now + self.period_s
+        else:
+            self._deadline += self.period_s
         return late_s
+
+    def anchor_after_send(self, now_s: float | None = None):
+        """Schedule the next tick relative to the send start."""
+        now = time.monotonic() if now_s is None else now_s
+        self._deadline = now + self.period_s

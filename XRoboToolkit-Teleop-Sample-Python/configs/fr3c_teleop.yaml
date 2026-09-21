@@ -1,0 +1,58 @@
+# FR3C 遥操总配置文件。single 和 dual 启动脚本都会读取这里的参数。
+# Fairino 的 gripper_force_percent 是 0~100 的力百分比，不是牛顿；
+# gripper_force_limit_n 只是安全目标记录，未经过实物标定时不能保证等于 3 N。
+
+common:                                      # 单臂、双臂都会使用的公共参数
+  robot_urdf_path: fr3c_assets/fr3c_teleop.urdf # Placo IK 使用的机械臂 URDF 文件
+  mujoco_xml_path: fr3c_assets/scene_fr3c.xml # MuJoCo 镜像显示使用的场景文件
+  initial_joints_deg: [0.0, -90.0, 51.5708, -51.5708, 270.0, 0.0] # --reset 时的初始关节角，单位：度
+  scale_factor: 1.0                           # VR 位姿到机械臂位姿的整体比例，越大动作越大
+  cmd_t: 0.01                                 # ServoJ 发送周期，单位：秒，推荐 0.008~0.016
+  servo_transport: udp                       # ServoJ 使用 UDP 实时流，延迟和抖动更低
+  smooth_tau_ms: 60.0                         # 关节目标时间平滑常数，单位：毫秒；越大越稳但延迟越大
+  max_joint_step_deg: 0.30                    # 每个 ServoJ 周期允许的最大关节步长，单位：度
+  input_min_cutoff_hz: 1.5                    # VR 静止时 One-Euro 滤波截止频率，越小越稳、延迟越大
+  input_beta: 0.08                            # VR 快速运动时的自适应增益，越大越跟手、越容易透传抖动
+  position_deadband_mm: 1.5                   # VR 平移死区，单位：毫米；小于此值的抖动被忽略
+  rotation_deadband_deg: 0.5                  # VR 旋转死区，单位：度；小于此值的抖动被忽略
+
+  gripper_index: 1                            # Fairino 夹爪编号，通常 1
+  gripper_velocity: 100                       # Fairino 夹爪运动速度百分比，100 为最快
+  gripper_force_percent: 20                   # Fairino 夹爪夹持力百分比；3% 可能不足以起动当前夹爪
+  gripper_open_force_percent: 100              # 启动/打开时的释放力百分比；打开不施加抓取力
+  gripper_force_limit_n: 3.0                  # 期望的物理力上限，单位：牛顿；需实物标定后才可换算
+  gripper_toggle_debounce_ms: 180             # 夹爪按钮去抖时间，单位：毫秒，防止一次按键触发多次
+  gripper_trigger_threshold: 0.05             # trigger 判定为“按下”的阈值；超过阈值只触发一次切换
+  gripper_min_change: 1.0                     # 夹爪目标位置变化小于此百分比时不重复发送
+  gripper_min_interval_s: 0.15                # 两次夹爪命令的最小间隔，单位：秒
+  gripper_open_percent: 0                    # 夹爪打开位置，Fairino 位置百分比
+  gripper_closed_percent: 90                  # SDK 官方示例的闭合位置，避免逼近机械限位后超时
+  gripper_max_time_ms: 30000                  # 单次夹爪动作最长时间，单位：毫秒；SDK 官方夹爪动作上限
+  activate_gripper: true                      # 启动时是否自动复位并激活夹爪
+  end_effector_hz: 50.0                       # 夹爪控制线程轮询频率，单位：Hz
+
+  reset: false                                # 启动时是否 MoveJ 到 initial_joints_deg
+  visualize_mujoco: false                     # 是否启动 MuJoCo 实时镜像窗口
+  visualize_placo: false                      # 是否启动 Placo/MeshCat 可视化
+  debug_csv_path: null                        # 单臂调试 JSONL 路径；null 表示不记录
+  debug_csv_dir: null                         # 双臂调试目录；null 表示不记录
+
+single:                                       # 单臂遥操专用参数
+  robot_ip: 192.168.5.23                      # 单臂连接的 FR3C 控制器 IP
+  controller_side: right                      # 使用哪只 VR 手柄：left 或 right
+  gripper_toggle_button: auto                 # 可选的摇杆按键上升沿开关；auto=跟随 controller_side；trigger 始终也是上升沿开关
+
+dual:                                         # 双臂遥操专用参数
+  dual_phase_offset_s: 0.005                  # 右臂 ServoJ/IK 相对左臂错开 5ms，避免双线程同相竞争造成抖动
+  left_robot_ip: 192.168.5.22                 # 左臂 FR3C 控制器 IP
+  right_robot_ip: 192.168.5.23                # 右臂 FR3C 控制器 IP
+  home_button_left: Y                         # 长按该按钮让左臂回 home 姿态
+  home_button_right: B                        # 长按该按钮让右臂回 home 姿态
+  home_joint_speed_dps: 10.0                  # 回 home 时的最大关节速度，单位：度/秒
+  home_q_left_deg: [-63.422, -77.906, -39.449, -134.366, 92.991, -47.235] # 左臂 home 关节角，单位：度
+  home_q_right_deg: [66.248, -91.981, 44.815, -51.790, 271.275, -32.616] # 右臂 home 关节角，单位：度
+  gripper_toggle_button_left: left_axis_click # 左夹爪开关按钮，上升沿触发
+  gripper_toggle_button_right: right_axis_click # 右夹爪开关按钮，上升沿触发
+  record_server_host: 192.168.5.27           # Jetson 采集服务 IP
+  record_server_port: 8766                    # Jetson 采集服务端口
+  record_task: fr3c_dual                     # 数据集任务名称，决定保存目录/任务标签

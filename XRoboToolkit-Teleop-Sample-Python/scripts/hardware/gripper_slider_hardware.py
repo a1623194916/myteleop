@@ -98,6 +98,7 @@ def main(
             min_position_change_percent=gripper_min_change,
             min_command_interval_s=gripper_min_interval_s,
             motion_done_gate=False,
+            trigger_toggle=False,
             gripper_index=gripper_index,
             velocity=gripper_velocity,
             force=gripper_force,

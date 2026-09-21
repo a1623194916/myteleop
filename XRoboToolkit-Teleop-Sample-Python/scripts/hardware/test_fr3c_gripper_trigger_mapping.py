@@ -1,14 +1,10 @@
-"""Offline (or real) verification of the VR trigger -> gripper mapping.
+"""Offline (or real) verification of the VR trigger -> gripper toggle.
 
 Simulates PICO input (a scripted ``left_trigger`` / ``right_trigger`` profile)
 fed through the same ``Fr3cVrGripperController`` used by
 ``teleop_fr3c_dual_hardware.py``, and inspects every ``move_gripper`` call it
-issues to confirm trigger depth maps to the expected closure
-(``position_percent``):
-
-    closure           = 0 if trigger <= threshold else (trigger - th)/(1 - th)
-    position_percent  = open + closure * (closed - open)     # open 0% / closed 95%
-    width_mm          = max_width * (1 - closure)
+issues to confirm one trigger press closes and the next trigger press opens.
+The standalone mapper math is checked separately.
 
 ``Fr3cVrGripperController`` only sends ``move_gripper`` when the commanded
 percent changes by >= ``--min-change``, so repeated trigger frames collapse into
@@ -52,6 +48,9 @@ class FakeRobot:
 
     def activate_gripper(self, index: int = 1, **kwargs):
         return 0
+
+    def latched_fault_code(self):
+        return (0, 0)
 
     def move_gripper(self, position_percent, index=1, **kwargs):
         self.commands.append(
@@ -126,10 +125,12 @@ def run_simulated(side, threshold, open_percent, close_percent, min_change, max_
     return the exact move_gripper positions it issues plus the expected ones."""
     from xrobotoolkit_teleop.hardware.fr3c_gripper import Fr3cVrGripperController
 
-    profile = [0.0, 0.1, 0.5, 1.0, 0.0, 0.0, 1.0]
+    profile = [0.0, 1.0, 1.0, 0.0, 0.0, 1.0]
     robot = FakeRobot()
+    left_profile = profile if side == "left" else [0.0] * len(profile)
+    right_profile = profile if side == "right" else [0.0] * len(profile)
     controller = Fr3cVrGripperController(
-        xr_client=FakeXrClient(profile, [0.0] * len(profile)),
+        xr_client=FakeXrClient(left_profile, right_profile),
         robot=robot,
         controller_side=side,
         trigger_threshold=threshold,
@@ -137,16 +138,13 @@ def run_simulated(side, threshold, open_percent, close_percent, min_change, max_
         closed_position_percent=close_percent,
         max_width_mm=max_width,
         min_position_change_percent=min_change,
+        min_command_interval_s=0.0,
+        toggle_debounce_s=0.0,
     )
     for _ in range(len(profile)):
         controller.update()
 
-    expected_sent, last = [], None
-    for trig in profile:
-        pos = expected_position(trig, threshold, open_percent, close_percent)
-        if last is None or abs(pos - last) >= min_change:
-            expected_sent.append(pos)
-            last = pos
+    expected_sent = [close_percent, open_percent]
 
     got = [round(c.position_percent, 4) for c in robot.commands]
     expected = [round(p, 4) for p in expected_sent]
@@ -162,8 +160,8 @@ class OneShotXrClient:
 
     def get_key_value_by_name(self, name):
         if name == f"{self._side}_trigger":
-            values = [1.0, 0.0]
-            v = values[min(self._i, 1)]
+            values = [0.0, 1.0, 0.0, 1.0]
+            v = values[min(self._i, len(values) - 1)]
             return v
 
         if name == f"{self._side}_grip":
@@ -214,12 +212,15 @@ def real_robot_move(robot_ip, side, threshold, open_percent, close_percent, no_m
         if no_move:
             print("      --no-move set: skipping MoveGripper")
             return 0
+        client.advance()
         controller.update()      # trigger 1.0 -> close
         print(f"      MoveGripper({close_pos}) issued (trigger 1.0). Watch it close...")
         client.advance()
         time.sleep(1.5)
-        controller.update()      # trigger 0.0 -> open
-        print(f"      MoveGripper({open_pos}) issued (trigger 0.0). Watch it open.")
+        controller.update()      # release, keep closed
+        client.advance()
+        controller.update()      # next trigger 1.0 -> open
+        print(f"      MoveGripper({open_pos}) issued (second trigger press). Watch it open.")
     finally:
         robot.close()
     return 0

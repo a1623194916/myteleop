@@ -48,9 +48,13 @@ class VRDataPublisher:
         self._running = False
 
         zmq_cfg = config.get("zmq", {})
-        self._ipc_addr = zmq_cfg.get("ipc_addr", "ipc:///tmp/vr_data.ipc")
+        self._bind_endpoint = zmq_cfg.get(
+            "bind_endpoint",
+            zmq_cfg.get("ipc_addr", "ipc:///tmp/vr_data.ipc"),
+        )
         self._publish_rate = config.get("publish_rate", 80)
         self._interval = 1.0 / self._publish_rate
+        self._buffer_size = int(config.get("buffer_size", 10))
 
         self._context: Optional[zmq.Context] = None
         self._socket: Optional[zmq.Socket] = None
@@ -69,9 +73,9 @@ class VRDataPublisher:
         try:
             self._context = zmq.Context()
             self._socket = self._context.socket(zmq.PUB)
-            self._socket.set_hwm(10)  # 设置高水位标记，防止消息积压
-            self._socket.bind(self._ipc_addr)
-            logger.info(f"ZeroMQ PUB socket bound to {self._ipc_addr}")
+            self._socket.set_hwm(self._buffer_size)
+            self._socket.bind(self._bind_endpoint)
+            logger.info(f"ZeroMQ PUB socket bound to {self._bind_endpoint}")
         except Exception as e:
             logger.error(f"Failed to initialize ZeroMQ: {e}")
             xrt.close()
@@ -196,8 +200,13 @@ def main():
     parser = argparse.ArgumentParser(description="VR Data Publisher")
     parser.add_argument(
         "--config", "-c",
-        default=str(Path(__file__).resolve().parents[2] / "configs" / "vr_bridge.yaml"),
+        default=str(Path(__file__).resolve().parent / "configs" / "vr_bridge.yaml"),
         help="Path to config file"
+    )
+    parser.add_argument(
+        "--bind",
+        default=None,
+        help="Override the ZeroMQ bind endpoint, e.g. tcp://100.64.0.24:5557",
     )
     args = parser.parse_args()
 
@@ -209,6 +218,9 @@ def main():
     else:
         logger.warning(f"Config file not found: {config_path}, using defaults")
         config = {}
+
+    if args.bind:
+        config.setdefault("zmq", {})["bind_endpoint"] = args.bind
 
     # 创建并启动发布器
     publisher = VRDataPublisher(config)

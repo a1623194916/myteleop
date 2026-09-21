@@ -108,29 +108,23 @@ class AbsoluteDeadlinePacerTests(unittest.TestCase):
         # Deadline is now 1.01: waking at 1.0095 is early -> no lateness.
         self.assertEqual(pacer.tick(now_s=1.0095), 0.0)
 
-    def test_late_tick_reports_lateness_and_schedule_stays_on_grid(self):
+    def test_late_tick_restarts_without_a_catch_up_burst(self):
         pacer = AbsoluteDeadlinePacer(0.01)
         pacer.reset(now_s=1.0)
 
-        # Woke 4 ms past the first deadline (grid: 1.000, 1.010, 1.020, ...).
+        # Woke 4 ms past the first deadline. The next send must be at least a
+        # full period later, rather than immediately catching up.
         self.assertAlmostEqual(pacer.tick(now_s=1.004), 0.004)
-        self.assertAlmostEqual(pacer.next_deadline_s, 1.010)
-        # A call arriving before the next deadline is early: it fires at once
-        # (no sleep), so one slow tick never pushes the following sends later.
-        self.assertEqual(pacer.tick(now_s=1.0045), 0.0)
-        self.assertAlmostEqual(pacer.next_deadline_s, 1.020)
-        self.assertEqual(pacer.tick(now_s=1.0145), 0.0)
-        self.assertAlmostEqual(pacer.next_deadline_s, 1.030)
+        self.assertAlmostEqual(pacer.next_deadline_s, 1.014)
 
     def test_resyncs_when_more_than_one_period_behind(self):
         pacer = AbsoluteDeadlinePacer(0.01)
         pacer.reset(now_s=1.0)
         pacer.tick(now_s=1.0)
 
-        # 3 periods late: must not burst stale ticks, schedule restarts now.
-        self.assertAlmostEqual(pacer.tick(now_s=1.031), 0.0)
-        # Deadline is now 1.041.
-        self.assertAlmostEqual(pacer.tick(now_s=1.035), 0.0)
+        # 3 periods late: must not burst stale ticks.
+        self.assertAlmostEqual(pacer.tick(now_s=1.031), 0.021)
+        self.assertAlmostEqual(pacer.next_deadline_s, 1.041)
 
     def test_periods_advance_exactly(self):
         pacer = AbsoluteDeadlinePacer(0.008)
@@ -139,6 +133,12 @@ class AbsoluteDeadlinePacerTests(unittest.TestCase):
         pacer.tick(now_s=0.0)
         pacer.tick(now_s=0.008)
         self.assertAlmostEqual(pacer.tick(now_s=0.016), 0.0)
+
+    def test_anchor_after_send_enforces_period_from_completed_rpc(self):
+        pacer = AbsoluteDeadlinePacer(0.01)
+        pacer.reset(now_s=1.0)
+        pacer.anchor_after_send(now_s=1.007)
+        self.assertAlmostEqual(pacer.next_deadline_s, 1.017)
 
 
 class OneEuroFilterTests(unittest.TestCase):
@@ -239,6 +239,68 @@ class PoseDeltaFilterTests(unittest.TestCase):
         )
 
         np.testing.assert_allclose(duplicate, first)
+
+    def test_zero_timestamp_uses_local_clock_instead_of_freezing(self):
+        pose_filter = PoseDeltaFilter(
+            min_cutoff_hz=2.0,
+            beta=0.02,
+            position_deadband_m=0.0,
+            rotation_deadband_rad=0.0,
+        )
+
+        pose_filter.update(np.zeros(3), np.zeros(3), timestamp_ns=0)
+        output, _ = pose_filter.update(
+            np.array([0.1, 0.0, 0.0]), np.zeros(3), timestamp_ns=0
+        )
+
+        self.assertGreater(output[0], 0.0)
+
+    def test_timestamp_reset_falls_back_to_local_clock(self):
+        pose_filter = PoseDeltaFilter(
+            min_cutoff_hz=2.0,
+            beta=0.02,
+            position_deadband_m=0.0,
+            rotation_deadband_rad=0.0,
+        )
+
+        pose_filter.update(np.zeros(3), np.zeros(3), timestamp_ns=10**12)
+        output, _ = pose_filter.update(
+            np.array([0.1, 0.0, 0.0]), np.zeros(3), timestamp_ns=1
+        )
+
+        self.assertGreater(output[0], 0.0)
+
+    def test_suspiciously_small_timestamp_delta_uses_default_period(self):
+        pose_filter = PoseDeltaFilter(
+            min_cutoff_hz=2.0,
+            beta=0.02,
+            position_deadband_m=0.0,
+            rotation_deadband_rad=0.0,
+        )
+
+        pose_filter.update(np.zeros(3), np.zeros(3), timestamp_ns=1_000_000)
+        output, _ = pose_filter.update(
+            np.array([0.1, 0.0, 0.0]), np.zeros(3), timestamp_ns=1_000_016
+        )
+
+        self.assertGreater(output[0], 0.0)
+
+    def test_non_finite_sample_holds_last_output(self):
+        pose_filter = PoseDeltaFilter(
+            min_cutoff_hz=2.0,
+            beta=0.02,
+            position_deadband_m=0.0,
+            rotation_deadband_rad=0.0,
+        )
+
+        expected, _ = pose_filter.update(
+            np.array([0.1, 0.0, 0.0]), np.zeros(3), timestamp_ns=10**9
+        )
+        output, _ = pose_filter.update(
+            np.array([np.nan, 0.0, 0.0]), np.zeros(3), timestamp_ns=2 * 10**9
+        )
+
+        np.testing.assert_allclose(output, expected)
 
     def test_sub_threshold_rotation_jitter_does_not_move_target(self):
         pose_filter = PoseDeltaFilter(

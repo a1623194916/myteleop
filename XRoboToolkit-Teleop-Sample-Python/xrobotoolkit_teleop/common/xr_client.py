@@ -1,3 +1,6 @@
+import os
+import threading
+
 import numpy as np
 import xrobotoolkit_sdk as xrt
 
@@ -7,19 +10,36 @@ class XrClient:
 
     def __init__(self):
         """Initializes the XrClient and the SDK."""
+        # XRoboToolkit's desktop service is attached to the first X display.
+        # Without DISPLAY, the SDK can initialize but return stale/zero hand
+        # state, which looks like a wrong left/right mapping to teleop.
+        if not os.environ.get("DISPLAY"):
+            os.environ["DISPLAY"] = ":1"
+            print("DISPLAY was unset; using XRoboToolkit display :1")
         xrt.init()
+        # Dual-arm teleop shares one native XR SDK client across the two IK
+        # and gripper threads. Keep calls into that client serialized so a
+        # left/right read cannot race the SDK's internal stream state.
+        self._sdk_lock = threading.RLock()
         print("XRoboToolkit SDK initialized.")
+
+    def _sdk_call(self, function):
+        lock = getattr(self, "_sdk_lock", None)
+        if lock is None:  # Compatibility with lightweight test doubles.
+            return function()
+        with lock:
+            return function()
 
     def get_pose_by_name(self, name: str) -> np.ndarray:
         """Returns the pose of the specified device by name.
         Valid names: "left_controller", "right_controller", "headset".
         Pose is [x, y, z, qx, qy, qz, qw]."""
         if name == "left_controller":
-            return xrt.get_left_controller_pose()
+            return self._sdk_call(xrt.get_left_controller_pose)
         elif name == "right_controller":
-            return xrt.get_right_controller_pose()
+            return self._sdk_call(xrt.get_right_controller_pose)
         elif name == "headset":
-            return xrt.get_headset_pose()
+            return self._sdk_call(xrt.get_headset_pose)
         else:
             raise ValueError(
                 f"Invalid name: {name}. Valid names are: 'left_controller', 'right_controller', 'headset'."
@@ -30,13 +50,13 @@ class XrClient:
         Valid names: "left_trigger", "right_trigger", "left_grip", "right_grip".
         """
         if name == "left_trigger":
-            return xrt.get_left_trigger()
+            return self._sdk_call(xrt.get_left_trigger)
         elif name == "right_trigger":
-            return xrt.get_right_trigger()
+            return self._sdk_call(xrt.get_right_trigger)
         elif name == "left_grip":
-            return xrt.get_left_grip()
+            return self._sdk_call(xrt.get_left_grip)
         elif name == "right_grip":
-            return xrt.get_right_grip()
+            return self._sdk_call(xrt.get_right_grip)
         else:
             raise ValueError(
                 f"Invalid name: {name}. Valid names are: 'left_trigger', 'right_trigger', 'left_grip', 'right_grip'."
@@ -49,21 +69,21 @@ class XrClient:
                       "left_axis_click", "right_axis_click"
         """
         if name == "A":
-            return xrt.get_A_button()
+            return self._sdk_call(xrt.get_A_button)
         elif name == "B":
-            return xrt.get_B_button()
+            return self._sdk_call(xrt.get_B_button)
         elif name == "X":
-            return xrt.get_X_button()
+            return self._sdk_call(xrt.get_X_button)
         elif name == "Y":
-            return xrt.get_Y_button()
+            return self._sdk_call(xrt.get_Y_button)
         elif name == "left_menu_button":
-            return xrt.get_left_menu_button()
+            return self._sdk_call(xrt.get_left_menu_button)
         elif name == "right_menu_button":
-            return xrt.get_right_menu_button()
+            return self._sdk_call(xrt.get_right_menu_button)
         elif name == "left_axis_click":
-            return xrt.get_left_axis_click()
+            return self._sdk_call(xrt.get_left_axis_click)
         elif name == "right_axis_click":
-            return xrt.get_right_axis_click()
+            return self._sdk_call(xrt.get_right_axis_click)
         else:
             raise ValueError(
                 f"Invalid name: {name}. Valid names are: 'A', 'B', 'X', 'Y', "
@@ -72,7 +92,7 @@ class XrClient:
 
     def get_timestamp_ns(self) -> int:
         """Returns the current timestamp in nanoseconds (int)."""
-        return xrt.get_time_stamp_ns()
+        return self._sdk_call(xrt.get_time_stamp_ns)
 
     def get_hand_tracking_state(self, hand: str) -> np.ndarray | None:
         """Returns the hand tracking state for the specified hand.
