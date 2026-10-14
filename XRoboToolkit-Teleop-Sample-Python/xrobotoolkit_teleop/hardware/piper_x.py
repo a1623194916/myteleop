@@ -55,7 +55,11 @@ class PiperXCanArm:
         gripper_max_width: float = 0.07,
         driver=None,
         read_only: bool = False,
+        motion_mode: str = "j",
     ):
+        if motion_mode not in {"j", "js"}:
+            raise ValueError("Piper motion mode must be j or js")
+        self.motion_mode = motion_mode
         self.channel = channel
         self.gripper_max_width = gripper_max_width
         self.gripper = None
@@ -122,7 +126,31 @@ class PiperXCanArm:
     def move_joints(self, joints):
         if self.read_only:
             raise RuntimeError("Read-only CAN session")
-        self.driver.move_j([float(q) for q in joints])
+        command = [float(q) for q in joints]
+        if self.motion_mode == "js":
+            self.driver.move_js(command)
+        else:
+            self.driver.move_j(command)
+
+    def open_gripper(self, force: float = 5.0, timeout: float = 5.0):
+        """Open to the configured stroke and verify fresh feedback before teleop."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            self.read_joints()  # Keep checking CAN health while waiting for the gripper.
+            self.set_gripper(1.0, force=force)
+            reading = self.gripper.get_gripper_status()
+            if reading is not None and time.time() - reading.timestamp <= 0.3:
+                msg = reading.msg
+                if msg.status_code & 0x3f:
+                    raise RuntimeError(f"{self.channel} gripper fault: 0x{msg.status_code:02x}")
+                if (msg.mode == "width" and msg.foc_status.driver_enable_status
+                        and abs(msg.value - self.gripper_max_width) <= 0.002):
+                    print(f"{self.channel} gripper open confirmed: {msg.value * 1000:.1f} mm "
+                          f"(target {self.gripper_max_width * 1000:.1f} mm)", flush=True)
+                    return
+            time.sleep(0.1)
+        raise RuntimeError(f"{self.channel} gripper did not open to {self.gripper_max_width * 1000:g} mm; "
+                           "check actual stroke, feedback and obstruction")
 
     def set_gripper(self, opening: float, force: float = 1.0):
         if self.read_only:

@@ -55,6 +55,9 @@ class FakeArm:
         self.grippers.append(opening)
         self.gripper_force = force
 
+    def open_gripper(self, force=5.0):
+        pass
+
     def read_joints(self):
         if self.fail:
             raise RuntimeError("CAN feedback lost")
@@ -142,6 +145,7 @@ class DualPiperTest(unittest.TestCase):
             native_client.assert_not_called()
         self.assertIs(left.controller.xr_client, right.controller.xr_client)
         left.arm, right.arm = FakeArm(), FakeArm()
+        left.gripper_armed = right.gripper_armed = True
         measured = np.asarray(HOME)
         left.solve(measured)  # Anchor left hand.
         xr.positions["left"] = 0.06
@@ -155,28 +159,29 @@ class DualPiperTest(unittest.TestCase):
         self.assertEqual(len(left.arm.commands), 1)
         self.assertEqual(len(right.arm.commands), 0)
         self.assertEqual(len(right.arm.grippers), 1)  # Trigger works with GRIP released.
-        self.assertAlmostEqual(right.arm.grippers[0], 0.8)
+        self.assertAlmostEqual(right.arm.grippers[0], 1 - (0.2 - 0.05) / 0.9)
         self.assertEqual(right.arm.gripper_force, 5.0)
-        self.assertAlmostEqual(left.arm.grippers[0], 0.2)
+        self.assertAlmostEqual(left.arm.grippers[0], 1 - (0.8 - 0.05) / 0.9)
         xr.values["left_grip"], xr.values["right_grip"] = 0, 1
         self.assertIsNone(left.solve(measured)[0])
         command, active = right.solve(measured)
         right.send(command, time.monotonic())
         self.assertTrue(active)
         self.assertEqual(len(right.arm.commands), 1)
-        self.assertAlmostEqual(right.arm.grippers[0], 0.8)
+        self.assertAlmostEqual(right.arm.grippers[0], 1 - (0.2 - 0.05) / 0.9)
 
     def test_gripper_refresh_and_rate_limit_without_joint_commands(self):
         xr = FakeXR()
         runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0, 0.6)
         runtime.arm = FakeArm()
+        runtime.gripper_armed = True
         runtime.send(None, 10.0)
         runtime.send(None, 10.05)
         self.assertEqual(len(runtime.arm.grippers), 1)
         runtime.send(None, 10.6)
         self.assertEqual(len(runtime.arm.grippers), 2)
         self.assertEqual(runtime.arm.commands, [])
-        self.assertAlmostEqual(runtime.gripper_command_m, 0.056)
+        self.assertAlmostEqual(runtime.gripper_command_m, (1 - (0.2 - 0.05) / 0.9) * 0.07)
 
     def test_ik_period_matches_loop_and_filters_reset_when_regripping(self):
         xr = FakeXR()
@@ -187,13 +192,41 @@ class DualPiperTest(unittest.TestCase):
         controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
         xr.positions["left"] = 0.1
         delta, _ = controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
-        self.assertLessEqual(np.linalg.norm(delta), 0.25 * 0.02 + 1e-9)
+        self.assertLessEqual(np.linalg.norm(delta), 0.5 * 0.02 + 1e-9)
         xr.positions["left"] = 1.0  # Tracker teleport must hold the target.
         held, _ = controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
         np.testing.assert_allclose(held, delta)
         controller.ref_controller_xyz["left_hand"] = None
         reset, _ = controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
         np.testing.assert_allclose(reset, 0)
+
+    def test_initial_gripper_stays_open_until_trigger_release_and_endpoints_snap(self):
+        xr = FakeXR()
+        runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0, 0.6)
+        runtime.arm = FakeArm()
+        xr.values["right_trigger"] = 1.0
+        runtime.send(None, 10)
+        self.assertEqual(runtime.arm.grippers[-1], 1.0)
+        xr.values["right_trigger"] = 0.03
+        runtime.send(None, 10.2)
+        self.assertTrue(runtime.gripper_armed)
+        xr.values["right_trigger"] = 0.97
+        runtime.send(None, 10.4)
+        self.assertEqual(runtime.arm.grippers[-1], 0.0)
+        xr.values["right_trigger"] = 0.01
+        runtime.send(None, 10.6)
+        self.assertEqual(runtime.arm.grippers[-1], 1.0)
+
+    def test_filtered_hand_step_reaches_within_six_mm_in_100ms(self):
+        xr = FakeXR()
+        runtime = entry.TeleopArm("left", "can0", xr, *build_scene(), 1.0, 0.6)
+        controller = runtime.controller
+        controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
+        xr.positions["left"] = 0.03
+        for _ in range(5):
+            delta, _ = controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
+        self.assertGreater(np.linalg.norm(delta), 0.024)
+        self.assertLessEqual(np.linalg.norm(delta), 0.03)
 
     def test_second_arm_preflight_failure_never_enables_first(self):
         xr, first_probe = FakeXR(), FakeArm()

@@ -2,7 +2,7 @@
 
 本实现使用 AgileX 官方 [`agx_arm_urdf/piper_x`](https://github.com/agilexrobotics/agx_arm_urdf/tree/main/piper_x) 的六轴 URDF 和 `piper_x_with_gripper_description.xacro`：仿真里的夹爪底座、两片手指、网格和关节位置均来自官方模型，不再使用替代方块。官方 xacro 的虚拟 `gripper` 关节只用于 mimic；MuJoCo 使用它所驱动的 `gripper_joint1/2` 两个实际手指关节，并按开口宽度分别设置正、负一半行程。`piper_ros/noetic` 中的 `piper_description` 是普通 Piper，不是 Piper-X，不能替换此模型。模型首次运行时按固定提交下载 URDF、xacro 和碰撞网格到 `assets/piper_x/generated/`，后续离线复用。参考的 [piper-X MuJoCo 示例](https://github.com/AB-pixel-pixel/piper-X) 也采用 AgileX 的 Piper-X URDF。
 
-GitHub 上另外核对了 [piper-robot-server](https://github.com/TactileRoboticsAI/piper-robot-server) 的 VR 遥操/70 mm 夹爪宽度约定和 [piper-quest3-teleop](https://github.com/InhyeokHwang/piper-quest3-teleop) 的夹爪命令边界；这两个项目面向普通 Piper，不能直接复用它们的 Piper-X 运动学或驱动参数。默认最大开口 `0.07 m` 与当前真机入口一致；官方模型关节上限允许到 `0.10 m`，确有该行程的夹爪可用仿真参数 `--gripper-max-width 0.1` 调整，真机参数须按实物确认。
+GitHub 上另外核对了 [piper-robot-server](https://github.com/TactileRoboticsAI/piper-robot-server) 的 VR 遥操/70 mm 夹爪宽度约定和 [piper-quest3-teleop](https://github.com/InhyeokHwang/piper-quest3-teleop) 的夹爪命令边界；这两个项目面向普通 Piper，不能直接复用它们的 Piper-X 运动学或驱动参数。仿真默认最大开口为 `0.07 m`，官方模型关节上限允许到 `0.10 m`，可用仿真参数 `--gripper-max-width 0.1` 调整。2026-10-14 只读查询确认本机两台 Piper-X 夹爪的控制器行程均为 `0.10 m`，真机默认采用此值；启动会确认夹爪张开，且须先松开 TRIGGER 才能开始闭合。
 
 AgileX 的 [questVR_ws](https://github.com/agilexrobotics/questVR_ws/blob/master/src/oculus_reader/scripts/teleop_single_piper.py) 也采用“第六轴后加工具坐标”的 IK，并将夹爪开口拆分为两个手指各半行程。它的模型是普通 Piper，代码中的 0.13 m 末端变换不适用于 Piper-X；本仿真根据官方 Piper-X 手指网格在 `link6` 后定义 `piper_x_tcp`（沿局部 z 轴 0.105 m），IK 和目标小球均绑定这一帧。此偏移代表两指工作区中心，**真机上的抓取 TCP 仍须用实物标定**。仿真腕部执行器加入阻尼并消除重叠网格的自接触，针对 8 cm 手柄阶跃的无头测试要求小球与实际 TCP 在稳定后相距小于 15 mm；这是自由空间跟随验证，不是碰撞安全认证。
 
@@ -87,6 +87,8 @@ candump -n 5 can0
 ```
 
 按住右手 GRIP 才发送关节目标，TRIGGER 独立控制夹爪（无需同时按 GRIP）；按 B 停止。默认 50 Hz、每周期最多 0.6 度、平移比例 1:1、厂商速度设置为 30%，IK 时间步长与频率一致。复用 UR 的 One-Euro 滤波、位姿死区、笛卡尔限速及手柄位置跳变保护；Piper 的坐标映射保留。夹爪默认 5 N、10 Hz 限频、0.5 秒周期刷新，终端显示真实夹爪反馈。具体可调参数和 Unity 启动见根目录 `run.md`。反馈超过 300 ms、失联、故障、关节越界或跟踪误差超过 0.2 rad 时退出。退出只断开 CAN，不执行断电、复位或回零；电机可能继续保持当前位置。不要把软件停止当作急停。可用 `--firmware` 指定已确认的驱动固件档位，`--gripper-max-width` 必须按实际夹爪行程设置。
+
+默认 `--motion-mode js` 使用 `move_js` 连续关节跟随，保留软件逐周期限幅；可用 `--motion-mode j` 回到轨迹规划模式。One-Euro 默认截止频率 4 Hz、beta=2，死区 1 mm / 0.3°，笛卡尔目标限速 0.5 m/s / 1.5 rad/s。启动夹爪目标为 100 mm，最多等待 5 秒确认新鲜反馈位于目标 ±2 mm 内，确认前不发送关节目标。启动会打开夹爪，移除夹持物后再启动。TRIGGER 松开端/按下端各留 5% 死区，终端显示实际循环频率和接管时的跟踪误差。
 
 启动会先等待 PICO 时间戳更新，再使能电机；运行中头显时间戳超过 500 ms 不更新即退出。
 

@@ -185,13 +185,17 @@ bash start_piper_x.sh --mode single --controller-side left --channel can0 --enab
 
 `tcp_eef` 的 105 mm 是模型定义，**尚未实物标定**，该状态写入录制元数据。HDF5 同时保留法兰和夹爪中心，避免混淆。默认 30 Hz 落盘，机器人状态来自默认 50 Hz 控制循环的最新快照，机器人和图像没有硬件同步；图像时间戳可辨别重复采样。
 
-默认手柄平移比例 1:1，50 Hz × 每周期 0.6° 的关节目标上限为 30°/秒，厂商速度参数为 30%；实际速度仍受 IK、反馈和驱动限制。IK 时间步长与控制频率一致。复用 UR 的 One-Euro 位姿滤波、2 mm / 0.5° 死区、0.25 m/s / 1.5 rad/s 笛卡尔目标限速和手柄位置跳变保护，但保留 Piper 自己的坐标映射。每次重新握持 GRIP 都重置滤波与参考点。可用 `--no-pose-filter` 关闭滤波，`--position-deadband`、`--rotation-deadband-deg`、`--max-linear-speed`、`--max-angular-speed` 调整对应参数。
+默认手柄平移比例 1:1，50 Hz × 每周期 0.6° 的关节目标上限为 30°/秒，厂商速度参数为 30%；实际速度仍受 IK、反馈和驱动限制。默认 `--motion-mode js` 使用 SDK 的连续关节跟随接口 `move_js`，避免 `move_j` 反复规划小段轨迹造成滞后；JS 自身没有轨迹平滑，软件仍保留关节限幅、跟踪误差与笛卡尔限速。需要原规划模式时使用 `--motion-mode j`。
 
-TRIGGER 独立于 GRIP：松开为张开，按下为闭合，中间值对应连续开度；只要手柄数据有效，不接管机械臂也能操作夹爪。默认夹持力 5 N，可用 `--gripper-force` 调整（支持 0 < 力 ≤ 10 N），最大开口仍为 `--gripper-max-width 0.07`。夹爪限频 10 Hz，至少每 0.5 秒重发目标；SDK 的宽度命令本身携带使能位。终端每 2 秒显示各臂 TRIGGER、夹爪目标/实际开度、使能和状态码；反馈缺失会明确报警。若 TRIGGER 数值变化但实际开度不变，应根据反馈检查夹爪接线、供电、状态及实际行程，而非只增大机械臂速度。
+IK 时间步长与控制频率一致。复用 UR 的 One-Euro 位姿滤波，按 Piper 调整为截止频率 4 Hz、beta=2，死区 1 mm / 0.3°，笛卡尔目标限速 0.5 m/s / 1.5 rad/s；保留手柄位置跳变保护和 Piper 自己的坐标映射。每次重新握持 GRIP 都重置滤波与参考点。可用 `--no-pose-filter` 关闭滤波，`--oneeuro-min-cutoff`、`--oneeuro-beta`、`--position-deadband`、`--rotation-deadband-deg`、`--max-linear-speed`、`--max-angular-speed` 调整对应参数。终端每 2 秒显示实际控制频率，接管期间显示 TCP 目标跟踪误差和关节目标误差，以区分滤波延迟、循环降频和真机跟踪滞后。
+
+TRIGGER 独立于 GRIP：松开为张开，按下为闭合，中间值对应连续开度；只要手柄数据有效，不接管机械臂也能操作夹爪。2026-10-14 已只读查询两台夹爪的控制器行程，均为 100 mm，因此真机默认最大开口改为 `--gripper-max-width 0.1`，不再沿用普通 Piper 的 70 mm。默认夹持力 5 N，可用 `--gripper-force` 调整（支持 0 < 力 ≤ 10 N）。
+
+启动先将所选夹爪张开到配置行程，等待新鲜反馈确认（允许 2 mm 误差，最多 5 秒），确认前不发送机械臂关节目标；张开失败或夹爪报故障则退出。此操作会打开夹爪，启动前请移除夹持物。启动时即使 TRIGGER 按着，也保持张开，必须先松开一次才能闭合；TRIGGER ≤ 0.05 映射完全张开，≥ 0.95 映射完全闭合，避免松开端的小幅噪声导致未开足。夹爪限频 10 Hz，至少每 0.5 秒重发目标；SDK 的宽度命令本身携带使能位。终端每 2 秒显示各臂 TRIGGER、夹爪目标/实际开度、使能和状态码；反馈缺失会明确报警。若 TRIGGER 数值变化但实际开度不变，应根据反馈检查夹爪接线、供电、状态及实际行程，而非只增大机械臂速度。
 
 录制开始前检查相机和机器人状态；相机超过 1 秒无新帧、机器人快照超过 300 ms 或字段缺失时，拒绝开始或结束当前 episode 并保留错误信息。相机故障停止录制，机械臂遥操仍继续；恢复后需重新按 A 开始。B / Ctrl+C 退出会结束正在录制的 episode。
 
-相机与 CAN/IK 各用独立进程。启动先检查相机，再要求收到持续更新的 PICO 数据，随后才使能机器人。按住各自手柄 **GRIP** 接管对应臂，松开停止发送，重新握持重定中心；各自 **TRIGGER** 控夹爪，**B / Ctrl+C**退出整个会话。启动不回零、不先移动到仿真 home，而是每周期从真实关节反馈计算 IK。默认夹爪最大开口 70 mm，按实物可调整 `--gripper-max-width`。
+相机与 CAN/IK 各用独立进程。启动先检查相机，再要求收到持续更新的 PICO 数据，随后才使能机器人并确认夹爪张开。按住各自手柄 **GRIP** 接管对应臂，松开停止发送，重新握持重定中心；各自 **TRIGGER** 控夹爪，**B / Ctrl+C**退出整个会话。启动不回零、不先移动到仿真 home，而是每周期从真实关节反馈计算 IK。默认夹爪最大开口 100 mm，按实物可调整 `--gripper-max-width`。
 
 若需要 VR 内显示相机，给同一命令添加 `--video`；否则保持默认即可。
 
@@ -274,6 +278,8 @@ XRoboToolkit-Teleop-Sample-Python/.venv/bin/python -m piper_teleop_recorder.chec
 依赖：系统 Python 的 `gi`、OpenCV、NumPy，GStreamer 的 `v4l2src`、`jpegdec`、`x264enc`，以及 `v4l2-ctl`、`ffmpeg`。本机已具备这些依赖。新机器可安装 `python3-gi python3-opencv python3-numpy gir1.2-gstreamer-1.0 gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly v4l-utils ffmpeg`。
 
 **现场验证边界（2026-10-14）：**两路 CAN 已 UP、1 Mbit/s，已成功读取两台真实 Piper-X 的六轴反馈（只读，不使能、不发运动）。真实 305 已完成双臂假状态的两段 A 键 episode，每段 19 行状态/JPEG 对齐且解码成功。实际双臂运动及真实手柄按键录制仍需现场联调；物理左右与 CAN 的对应关系须按接线核对。
+
+后续用户日志已确认右臂能接管、夹爪能开合且使能反馈正常；只读查询确认两台夹爪配置行程为 100 mm。新的启动张开确认、JS 跟随及滤波参数通过无硬件回归，尚未发送真机测试运动。
 
 <a id="fr3c"></a>
 

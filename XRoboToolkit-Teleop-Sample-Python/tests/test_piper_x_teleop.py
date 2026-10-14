@@ -2,6 +2,7 @@
 
 import time
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 import mujoco
@@ -49,8 +50,54 @@ class FakeArm:
     def move_j(self, joints):
         self.commands.append(joints)
 
+    def move_js(self, joints):
+        self.js_command = joints
+        self.commands.append(joints)
+
 
 class PiperXTeleopTests(unittest.TestCase):
+    def test_stream_mode_uses_js_and_keeps_read_only_guard(self):
+        fake = FakeArm()
+        arm = PiperXCanArm(driver=fake, motion_mode="js")
+        try:
+            arm.move_joints([0.001] * 6)
+            self.assertEqual(fake.js_command, [0.001] * 6)
+        finally:
+            arm.close()
+
+    def test_startup_open_verifies_real_width_without_joint_motion(self):
+        fake = FakeArm()
+        fake.gripper.get_gripper_status = lambda: SimpleNamespace(
+            timestamp=time.time(), msg=SimpleNamespace(
+                value=0.0995, mode="width", status_code=0x40,
+                foc_status=SimpleNamespace(driver_enable_status=True)))
+        arm = PiperXCanArm(driver=fake, gripper_max_width=0.1)
+        try:
+            arm.open_gripper()
+            self.assertEqual(len(fake.commands), 1)
+            self.assertEqual(fake.commands[0], {"value": 0.1, "force": 5.0})
+        finally:
+            arm.close()
+
+    def test_startup_open_fails_on_obstruction_or_gripper_fault(self):
+        fake = FakeArm()
+        status = SimpleNamespace(value=0.033, mode="width", status_code=0x40,
+                                 foc_status=SimpleNamespace(driver_enable_status=True))
+        fake.gripper.get_gripper_status = lambda: SimpleNamespace(timestamp=time.time(), msg=status)
+        arm = PiperXCanArm(driver=fake, gripper_max_width=0.1)
+        clock = [0.0]
+        try:
+            with patch("xrobotoolkit_teleop.hardware.piper_x.time.monotonic", side_effect=lambda: clock[0]), \
+                 patch("xrobotoolkit_teleop.hardware.piper_x.time.sleep", side_effect=lambda _: clock.__setitem__(0, clock[0] + 1)):
+                with self.assertRaisesRegex(RuntimeError, "did not open to 100 mm"):
+                    arm.open_gripper(timeout=2)
+            status.status_code = 0x20
+            with self.assertRaisesRegex(RuntimeError, "gripper fault"):
+                arm.open_gripper()
+            self.assertTrue(all(isinstance(command, dict) for command in fake.commands))
+        finally:
+            arm.close()
+
     def test_official_model_has_matching_ik_joints_and_position_actuators(self):
         urdf, scene = build_scene()
         self.assertTrue(urdf.exists())

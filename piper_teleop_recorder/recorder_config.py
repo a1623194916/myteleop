@@ -53,8 +53,9 @@ class CanConfig:
     channel: str = "can0"
     firmware: Any = None  # None -> auto-probe firmware profile
     speed_percent: int = 30
-    gripper_max_width: float = 0.07
+    gripper_max_width: float = 0.10
     gripper_force: float = 5.0
+    motion_mode: str = "js"
 
 
 @dataclass
@@ -65,10 +66,12 @@ class ControlConfig:
     max_joint_step_deg: float = 0.6
     scale_factor: float = 1.0
     no_pose_filter: bool = False
-    position_deadband: float = 0.002
-    rotation_deadband_deg: float = 0.5
-    max_linear_speed: float = 0.25
+    position_deadband: float = 0.001
+    rotation_deadband_deg: float = 0.3
+    max_linear_speed: float = 0.5
     max_angular_speed: float = 1.5
+    oneeuro_min_cutoff: float = 4.0
+    oneeuro_beta: float = 2.0
     deadman_threshold: float = 0.9  # right_grip value above this engages teleop
     poll_rate_hz: float = 20.0  # button edge-detection poll rate
 
