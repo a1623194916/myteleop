@@ -48,8 +48,9 @@ class FakeArm:
         self.closed = False
         self.fail = fail
 
-    def move_joints(self, command):
+    def move_joints(self, command, motion_mode=None):
         self.commands.append(command)
+        self.motion_mode = motion_mode
 
     def set_gripper(self, opening, force=1.0):
         self.grippers.append(opening)
@@ -68,6 +69,49 @@ class FakeArm:
 
 
 class DualPiperTest(unittest.TestCase):
+    def test_main_b_returns_only_right_and_y_returns_left_without_exiting(self):
+        xr, frames, sent, solved = FakeXR(), [0], [], []
+        xr.get_button_state_by_name = lambda name: frames[0] >= (1 if name == "B" else 2)
+        def runtime(side, channel, *args, **kwargs):
+            def solve(measured):
+                solved.append((frames[0], side))
+                return None, False
+            return SimpleNamespace(
+                side=side, channel=channel, arm=None,
+                follower=SimpleNamespace(lower=np.full(6, -1.), upper=np.full(6, 1.)),
+                solve=solve, release_clutch=lambda: None,
+                send=lambda command, tick, **kw: sent.append((frames[0], side, command, kw)),
+            )
+        def sleep(_):
+            frames[0] += 1
+            if frames[0] == 3:
+                raise KeyboardInterrupt
+        with patch("xrobotoolkit_teleop.common.xr_client.XrClient", return_value=xr), \
+             patch.object(entry, "TeleopArm", side_effect=runtime), \
+             patch.object(entry, "PiperXCanArm", side_effect=lambda **kw: FakeArm()), \
+             patch.object(FakeArm, "read_joints", return_value=np.zeros(6)), \
+             patch.object(entry, "load_home_targets", return_value={s: np.full(6, 0.1) for s in ("left", "right")}), \
+             patch.object(entry, "wait_for_pico"), \
+             patch.object(entry.time, "sleep", side_effect=sleep):
+            with self.assertRaises(KeyboardInterrupt):
+                entry.main(mode="dual", enable_hardware=True)
+        self.assertIn((1, "left"), solved)
+        self.assertNotIn((1, "right"), solved)
+        right = next(item for item in sent if item[:2] == (1, "right"))
+        left = next(item for item in sent if item[:2] == (2, "left"))
+        for item in (right, left):
+            self.assertIsNotNone(item[2])
+            self.assertTrue(item[3]["home_return"])
+            self.assertFalse(item[3]["update_gripper"])
+        self.assertTrue(xr.closed)
+
+    def test_home_send_uses_planned_motion_and_holds_gripper(self):
+        runtime = entry.TeleopArm("right", "can1", FakeXR(), *build_scene(), 1.0, 0.6)
+        runtime.arm = FakeArm()
+        runtime.send(np.asarray(HOME), 10, update_gripper=False, home_return=True)
+        self.assertEqual(runtime.arm.motion_mode, "j")
+        self.assertEqual(runtime.arm.grippers, [])
+
     def test_startup_waits_past_five_seconds_and_for_both_hands(self):
         xr = FakeXR()
         clock = [0.0]
@@ -94,7 +138,7 @@ class DualPiperTest(unittest.TestCase):
     def test_cancel_wait_closes_xr_without_opening_can(self):
         xr = FakeXR()
         with patch("xrobotoolkit_teleop.common.xr_client.XrClient", return_value=xr), \
-             patch.object(entry, "TeleopArm", return_value=SimpleNamespace(arm=None)), \
+             patch.object(entry, "TeleopArm", return_value=SimpleNamespace(arm=None, follower=SimpleNamespace(lower=np.full(6, -10.), upper=np.full(6, 10.)))), \
              patch.object(entry, "wait_for_pico", side_effect=KeyboardInterrupt), \
              patch.object(entry, "PiperXCanArm") as can:
             with self.assertRaises(KeyboardInterrupt):
@@ -114,6 +158,7 @@ class DualPiperTest(unittest.TestCase):
         live["can1"].read_joints = right_feedback
         def runtime(side, channel, *args, **kwargs):
             return SimpleNamespace(side=side, channel=channel, arm=None,
+                                   follower=SimpleNamespace(lower=np.full(6, -10.), upper=np.full(6, 10.)),
                                    solve=lambda measured: self.fail("IK called before checking both feedbacks"))
         def connect(channel, read_only=False, **kwargs):
             return FakeArm() if read_only else live[channel]
@@ -237,7 +282,7 @@ class DualPiperTest(unittest.TestCase):
                 raise RuntimeError("second arm unavailable")
             return first_probe
         with patch("xrobotoolkit_teleop.common.xr_client.XrClient", return_value=xr), \
-             patch.object(entry, "TeleopArm", return_value=SimpleNamespace(arm=None)), \
+             patch.object(entry, "TeleopArm", return_value=SimpleNamespace(arm=None, follower=SimpleNamespace(lower=np.full(6, -10.), upper=np.full(6, 10.)))), \
              patch.object(entry, "PiperXCanArm", side_effect=connect):
             with self.assertRaisesRegex(RuntimeError, "second arm"):
                 entry.main(mode="dual", enable_hardware=True)

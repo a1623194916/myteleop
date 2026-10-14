@@ -83,18 +83,20 @@ candump -n 5 can0
 最后一条仅打印预检信息，不连接 CAN、不使能电机。可添加 `--read-only --channel can0` 读取十次关节反馈，该模式不使能、不配置速度、不初始化夹爪。先核实关节方向、固件和夹爪最大开度与真实设备相符，再在有人监护、低速且急停就绪时明确启用：
 
 ```bash
-.venv/bin/python scripts/hardware/teleop_piper_x_hardware.py --enable-hardware --channel can0
+.venv/bin/python scripts/hardware/teleop_piper_x_hardware.py --enable-hardware --controller-side right --channel can1
 ```
 
-按住右手 GRIP 才发送关节目标，TRIGGER 独立控制夹爪（无需同时按 GRIP）；按 B 停止。默认 50 Hz、每周期最多 0.6 度、平移比例 1:1、厂商速度设置为 30%，IK 时间步长与频率一致。复用 UR 的 One-Euro 滤波、位姿死区、笛卡尔限速及手柄位置跳变保护；Piper 的坐标映射保留。夹爪默认 5 N、10 Hz 限频、0.5 秒周期刷新，终端显示真实夹爪反馈。具体可调参数和 Unity 启动见根目录 `run.md`。反馈超过 300 ms、失联、故障、关节越界或跟踪误差超过 0.2 rad 时退出。退出只断开 CAN，不执行断电、复位或回零；电机可能继续保持当前位置。不要把软件停止当作急停。可用 `--firmware` 指定已确认的驱动固件档位，`--gripper-max-width` 必须按实际夹爪行程设置。
+按住右手 GRIP 才发送关节目标，TRIGGER 独立控制夹爪（无需同时按 GRIP）；右 B 回右臂保存的初始姿态，左 Y 回左臂；Ctrl+C 退出。默认 50 Hz、每周期最多 0.6 度、平移比例 1:1、厂商速度设置为 30%，IK 时间步长与频率一致。复用 UR 的 One-Euro 滤波、位姿死区、笛卡尔限速及手柄位置跳变保护；Piper 的坐标映射保留。夹爪默认 5 N、10 Hz 限频、0.5 秒周期刷新，终端显示真实夹爪反馈。具体可调参数和 Unity 启动见根目录 `run.md`。反馈超过 300 ms、失联、故障、关节越界或跟踪误差超过 0.2 rad 时退出。退出只断开 CAN，不执行断电、复位或回零；电机可能继续保持当前位置。不要把软件停止当作急停。可用 `--firmware` 指定已确认的驱动固件档位，`--gripper-max-width` 必须按实际夹爪行程设置。
 
 默认 `--motion-mode js` 使用 `move_js` 连续关节跟随，保留软件逐周期限幅；可用 `--motion-mode j` 回到轨迹规划模式。One-Euro 默认截止频率 4 Hz、beta=2，死区 1 mm / 0.3°，笛卡尔目标限速 0.5 m/s / 1.5 rad/s。启动夹爪目标为 100 mm，最多等待 5 秒确认新鲜反馈位于目标 ±2 mm 内，确认前不发送关节目标。启动会打开夹爪，移除夹持物后再启动。TRIGGER 松开端/按下端各留 5% 死区，终端显示实际循环频率和接管时的跟踪误差。
 
 启动会先等待 PICO 时间戳更新，再使能电机；运行中头显时间戳超过 500 ms 不更新即退出。
 
+保存的初始姿态位于根目录 `configs/piper_x_home.json`，采集时间为 2026-10-14 18:46:19，默认左 can0、右 can1。左 J3、右 J2/J3 的实测读数略超控制器限位，原始值保留，回位时限定为 0°，启动显示实际目标。回位用 `move_j` 规划，默认目标递进 15°/秒、完成误差 0.5°、超时 30 秒；`--home-config`、`--home-speed-deg-s`、`--home-timeout` 可调整。回位保持该臂夹爪，另一臂可继续遥操；松开并再次按对应按钮取消继续发送回位目标，完成/取消后需松开 GRIP 再接管。没有双臂互碰或路径避障。原始角度和受限目标详见根目录 `run.md`；尚未执行真机回位测试。
+
 ## 本机 Gemini 305 画面与一体启动
 
-在仓库根目录执行 `bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-channel can1`，启动双臂、USB RGB 采集和 A 键录制，默认不向 VR 推视频。只用右臂时改为 `--mode single --controller-side right --channel can1`，只用左臂时改为 `--mode single --controller-side left --channel can0`。默认映射是左 can0、右 can1，按实物接线核对；可交换 `--left-channel` / `--right-channel`。两臂独立 GRIP 接管和 TRIGGER 夹爪，共用一个头显连接。右手柄 A 按一次开始整段 episode，再按一次结束，B / Ctrl+C 结束整个会话。
+在仓库根目录执行 `bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-channel can1`，启动双臂、USB RGB 采集和 A 键录制，默认不向 VR 推视频。只用右臂时改为 `--mode single --controller-side right --channel can1`，只用左臂时改为 `--mode single --controller-side left --channel can0`。默认映射是左 can0、右 can1，按实物接线核对；修改 `--left-channel` / `--right-channel` 时也要核对保存姿态配置的 channel。两臂独立 GRIP 接管和 TRIGGER 夹爪，共用一个头显连接。右手柄 A 按一次开始整段 episode，再按一次结束，B 回右臂、Y 回左臂且不结束录制，Ctrl+C 结束整个会话。
 
 双臂每段文件同时记录 `left_joint_rad` / `right_joint_rad`、两臂的法兰/TCP、夹爪、下发目标和共享 305 图像；数据目录为 `/home/u22/kyz/datasets/piper_dual/episodes/`。单臂保留原无侧别前缀字段，目录为 `piper_reach/episodes/`。每臂 TCP 都在自己的基坐标系，没有双臂互碰检查。双臂任一反馈/手柄失效会结束整个会话。
 

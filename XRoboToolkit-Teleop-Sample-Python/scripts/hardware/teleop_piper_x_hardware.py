@@ -10,6 +10,7 @@ import numpy as np
 import tyro
 
 from xrobotoolkit_teleop.hardware.piper_x import JointFollower, PiperXCanArm
+from xrobotoolkit_teleop.hardware.piper_x_home import JointHomeReturn, load_home_targets
 from xrobotoolkit_teleop.simulation.piper_x_model import JOINTS, TCP_LINK, TCP_OFFSET_M, build_scene
 
 
@@ -115,10 +116,23 @@ class TeleopArm:
         active = self.xr.get_key_value_by_name(f"{self.side}_grip") > 0.9
         return self.follower.next(measured, target, active), active
 
-    def send(self, command, tick):
+    def release_clutch(self):
+        name = f"{self.side}_hand"
+        self.controller.ref_ee_xyz[name] = None
+        self.controller.ref_controller_xyz[name] = None
+        self.follower.last_command = None
+
+    def send(self, command, tick, update_gripper=True, home_return=False):
         if command is not None:
-            self.arm.move_joints(command)
+            if home_return:
+                # Planned joint mode is used for home, including the small
+                # boundary correction in the saved physical pose.
+                self.arm.move_joints(command, motion_mode="j")
+            else:
+                self.arm.move_joints(command)
             self.last_command = command.copy()
+        if not update_gripper:
+            return
         trigger = float(np.clip(self.xr.get_key_value_by_name(f"{self.side}_trigger"), 0, 1))
         self.last_trigger = trigger
         if trigger <= 0.05:
@@ -200,8 +214,11 @@ def main(
     left_firmware: str | None = None,
     right_firmware: str | None = None,
     pico_wait_timeout: float = 0.0,
+    home_config: str = str(Path(__file__).resolve().parents[3] / "configs/piper_x_home.json"),
+    home_speed_deg_s: float = 15.0,
+    home_timeout: float = 30.0,
 ) -> None:
-    """Independent GRIP/TRIGGER per arm; A records both; B stops the whole session."""
+    """Independent GRIP/TRIGGER; A records; B returns right, Y returns left; Ctrl+C exits."""
     selected = select_arms(mode, controller_side, channel, left_channel, right_channel)
     profiles = {side: (left_firmware if side == "left" else right_firmware) or firmware
                 for side in selected}
@@ -233,6 +250,9 @@ def main(
         raise ValueError("Cartesian speed limits must be positive")
     if oneeuro_min_cutoff <= 0 or oneeuro_beta < 0:
         raise ValueError("Invalid One-Euro filter parameters")
+    if not 0 < home_speed_deg_s <= 30 or not 0 < home_timeout <= 120:
+        raise ValueError("Use 0 < home-speed-deg-s <= 30 and 0 < home-timeout <= 120")
+    home_targets = load_home_targets(home_config, selected)
 
     from xrobotoolkit_teleop.common.xr_client import XrClient
 
@@ -249,6 +269,14 @@ def main(
                 max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
                 oneeuro_min_cutoff=oneeuro_min_cutoff, oneeuro_beta=oneeuro_beta,
             )
+        homes = {}
+        for side, runtime in runtimes.items():
+            homes[side] = JointHomeReturn(
+                side, home_targets[side], runtime.follower.lower, runtime.follower.upper,
+                min(np.deg2rad(home_speed_deg_s) / rate_hz, np.deg2rad(max_joint_step_deg)),
+                timeout=home_timeout,
+            )
+            runtime.follower.feedback_limit_margin_rad = homes[side].feedback_margin
         if record_config:
             sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
             from piper_teleop_recorder.session import PiperRecordingSession
@@ -264,6 +292,10 @@ def main(
                                                   "motion_mode": motion_mode,
                                                   "oneeuro_min_cutoff": oneeuro_min_cutoff,
                                                   "oneeuro_beta": oneeuro_beta,
+                                                  "home_config": str(Path(home_config).resolve()),
+                                                  "home_joint_rad": {side: home.target.tolist() for side, home in homes.items()},
+                                                  "home_speed_deg_s": home_speed_deg_s,
+                                                  "home_motion_mode": "j",
                                               })
             recording.cfg.control.rate_hz = rate_hz
             recording.cfg.control.max_joint_step_deg = max_joint_step_deg
@@ -309,7 +341,7 @@ def main(
         wait_for_pico(xr, selected, pico_wait_timeout, motors_enabled=True)
 
         timestamp, packet_time = xr.get_timestamp_ns(), time.monotonic()
-        print("Piper-X enabled. Each hand's GRIP engages its arm; TRIGGER controls its gripper; B stops all.")
+        print("Piper-X enabled: GRIP takes over, TRIGGER controls gripper; B returns right, Y returns left; Ctrl+C exits.")
         print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint cap={rate_hz * max_joint_step_deg:g} deg/s, "
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
               f"Cartesian cap={max_linear_speed:g} m/s; mode={motion_mode}; "
@@ -324,16 +356,25 @@ def main(
                 timestamp, packet_time = current_timestamp, tick
             if tick - packet_time > 0.5:
                 raise RuntimeError("PICO packets stopped updating (> 500 ms); stopping all arms")
-            if xr.get_button_state_by_name("B"):
-                print("B pressed: stopping all arms")
-                break
             # Verify every selected arm/hand before sending either arm's target.
             for side in selected:
                 validate_controller(xr, side)
             measured = {side: runtime.arm.read_joints() for side, runtime in runtimes.items()}
-            solutions = {side: runtime.solve(measured[side]) for side, runtime in runtimes.items()}
+            solutions, home_handled = {}, {}
             for side, runtime in runtimes.items():
-                runtime.send(solutions[side][0], tick)
+                command, handled = homes[side].step(
+                    measured[side], xr.get_button_state_by_name("B" if side == "right" else "Y"),
+                    xr.get_key_value_by_name(f"{side}_grip") > 0.9, tick,
+                )
+                home_handled[side] = handled
+                if handled:
+                    runtime.release_clutch()
+                    solutions[side] = (command, False)
+                else:
+                    solutions[side] = runtime.solve(measured[side])
+            for side, runtime in runtimes.items():
+                runtime.send(solutions[side][0], tick, update_gripper=not home_handled[side],
+                             home_return=home_handled[side])
             report_cycles += 1
             if tick >= next_gripper_report:
                 actual_hz = report_cycles / max(tick - report_started, 1e-6)
@@ -352,6 +393,7 @@ def main(
                 state = {}
                 for side, runtime in runtimes.items():
                     state.update(runtime.recording_state(measured[side], solutions[side][1], mode == "dual"))
+                    state[(side + "_" if mode == "dual" else "") + "returning_home"] = homes[side].returning
                 recording.update(state)
                 if recording.controller._thread is None:
                     recording.start()

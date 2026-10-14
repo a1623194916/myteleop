@@ -93,7 +93,7 @@ class RecordController:
     """
 
     def __init__(self, config, button_source, subtask_tracker,
-                 recorder_factory, next_id_fn):
+                 recorder_factory, next_id_fn, stop_button="B"):
         self.cfg = config
         self.buttons = button_source
         self.subtask = subtask_tracker
@@ -106,6 +106,7 @@ class RecordController:
         self._stop = threading.Event()
         self._thread = None
         self.stop_requested = False  # set when right-B is pressed
+        self.stop_button = stop_button
 
     # ---- extra per-frame values written into v/subtask, v/right_trigger ... ----
     def extra_fn(self):
@@ -159,7 +160,7 @@ class RecordController:
                   f"({self.subtask.current_name})")
         # Optional session stop on right-B.
         try:
-            if self.buttons.get_button_state_by_name("B"):
+            if self.stop_button and self.buttons.get_button_state_by_name(self.stop_button):
                 self.stop_requested = True
         except Exception:
             pass

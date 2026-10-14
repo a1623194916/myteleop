@@ -21,6 +21,8 @@ while (( $# )); do
     --help|-h)
       echo 'Usage: bash start_piper_x.sh --mode single|dual [--controller-side left|right] [robot options]'
       echo 'Default: dual; left=can0, right=can1; A-key recording; NO headset video.'
+      echo 'Right B returns right arm; left Y returns left arm; Ctrl+C exits. Home holds gripper.'
+      echo '--home-config FILE sets saved poses; --home-speed-deg-s defaults to 15.'
       echo 'Use --left-channel/--right-channel to change the mapping, or --channel in single mode.'
       echo '--no-camera disables capture/recording; --video enables optional headset video.'
       echo '--read-only checks feedback without motor enable; --enable-hardware enables real teleoperation.'

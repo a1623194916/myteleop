@@ -8,7 +8,8 @@ import numpy as np
 class JointFollower:
     """Limit each commanded increment and require fresh, plausible feedback."""
 
-    def __init__(self, lower, upper, max_step_rad: float = 0.006, max_error_rad: float = 0.2):
+    def __init__(self, lower, upper, max_step_rad: float = 0.006, max_error_rad: float = 0.2,
+                 feedback_limit_margin_rad: float = 0.05):
         self.lower = np.asarray(lower, dtype=float)
         self.upper = np.asarray(upper, dtype=float)
         if self.lower.shape != (6,) or self.upper.shape != (6,) or np.any(self.lower >= self.upper):
@@ -17,6 +18,7 @@ class JointFollower:
             raise ValueError("Joint step and tracking tolerance must be positive")
         self.max_step_rad = float(max_step_rad)
         self.max_error_rad = float(max_error_rad)
+        self.feedback_limit_margin_rad = float(feedback_limit_margin_rad)
         self.last_command = None
 
     def next(self, measured, target, active: bool):
@@ -27,7 +29,8 @@ class JointFollower:
             raise ValueError("Piper-X needs exactly six joint angles")
         if not np.all(np.isfinite(measured)) or not np.all(np.isfinite(target)):
             raise ValueError("Non-finite joint feedback or IK target")
-        if np.any(measured < self.lower - 0.05) or np.any(measured > self.upper + 0.05):
+        if (np.any(measured < self.lower - self.feedback_limit_margin_rad)
+                or np.any(measured > self.upper + self.feedback_limit_margin_rad)):
             raise RuntimeError("Piper-X joint feedback exceeds model limits")
         if not active:
             self.last_command = None
@@ -123,11 +126,14 @@ class PiperXCanArm:
             raise RuntimeError("Invalid Piper-X joint feedback")
         return joints
 
-    def move_joints(self, joints):
+    def move_joints(self, joints, motion_mode=None):
         if self.read_only:
             raise RuntimeError("Read-only CAN session")
         command = [float(q) for q in joints]
-        if self.motion_mode == "js":
+        selected_mode = self.motion_mode if motion_mode is None else motion_mode
+        if selected_mode not in {"j", "js"}:
+            raise ValueError("Piper motion mode must be j or js")
+        if selected_mode == "js":
             self.driver.move_js(command)
         else:
             self.driver.move_j(command)

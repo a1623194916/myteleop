@@ -28,7 +28,7 @@ def require_teleop_stopped():
         if re.match(r"^(?:\S*/)?python[\d.]*\s", command) and (
             "teleop_piper_x_hardware.py" in command or "piper_teleop_recorder.teleop_record" in command
         ):
-            raise RuntimeError("Piper teleop is still running. Stop it with B / Ctrl+C first.")
+            raise RuntimeError("Piper teleop is still running. Stop it with Ctrl+C first.")
 
 
 def countdown(delay):

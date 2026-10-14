@@ -34,6 +34,13 @@ class Camera:
 
 
 class RecordingTest(unittest.TestCase):
+    def test_b_home_button_does_not_stop_hardware_recording_controller(self):
+        buttons = Buttons()
+        buttons.get_button_state_by_name = lambda name: name == "B"
+        session = PiperRecordingSession(str(Path(__file__).parent / "configs/piper_local_305.yaml"), buttons, 0.105)
+        session.controller._poll_once()
+        self.assertFalse(session.controller.stop_requested)
+
     def test_dual_snapshot_requires_both_arms_and_records_channel_mapping(self):
         with tempfile.TemporaryDirectory() as root:
             config = Path(__file__).parent / "configs/piper_dual_local_305.yaml"

@@ -102,7 +102,7 @@ class PiperRecordingSession:
         self.camera = CameraCache(self.cfg.camera)
         self.controller = SessionController(
             self.cfg, xr, SubtaskTracker(self.cfg.subtasks), self.make_recorder,
-            lambda: next_episode_id(self.cfg.output_dir, self.cfg.task))
+            lambda: next_episode_id(self.cfg.output_dir, self.cfg.task), stop_button=None)
 
     def prepare(self):
         if not self.cfg.camera.serials or not 0 < self.cfg.fps <= 60:
