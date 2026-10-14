@@ -38,7 +38,14 @@ XRoboToolkit-Teleop-Sample-Python/.venv/bin/python test_pico_xrt_pipeline.py
 
 建议先完成仿真验证，再启用 CAN、检查真实反馈并启动真机遥操。详细模型与驱动说明见 [Piper-X 专项指南](XRoboToolkit-Teleop-Sample-Python/docs/piper_x_teleop.md)。
 
-### MuJoCo 仿真遥操
+真机按以下顺序启动：公共 PC Service / PICO → CAN 配置 → 只读反馈检查 → 选择下面一种遥操模式。默认双臂；日常无需在 VR 中显示相机。
+
+- [双臂遥操 + A 键录制](#piper-dual-record)
+- [单臂遥操 + A 键录制（左臂 / 右臂）](#piper-single-record)
+- [不开相机、不录制（双臂 / 单臂）](#piper-no-camera)
+- [可选：VR 显示相机画面](#piper-vr-video)
+
+### 单臂 MuJoCo 仿真遥操
 
 #### 假输入无头自检（不用头显、CAN 或真机）
 
@@ -107,31 +114,13 @@ bash start_piper_x.sh --mode dual --no-camera --read-only \
 
 应连续输出十次两台机械臂各自的六轴实测角度。只检查一台时使用 `--mode single --controller-side left --channel can0` 或 `--mode single --controller-side right --channel can1`。读不到反馈先检查接口、上电和接线；不要直接启动运动。
 
-#### 4. 可选：相机画面配置到头显
-
-日常遥操和 A 键录制无需在 VR 里看相机，本步骤可以跳过。默认启动只为录制采集 305 图像，不开启头显视频；需要显示时才配置本节并使用 `--video`。
-
-在有 adb 且已连接 PICO 的电脑上执行以下命令；本机目前未安装 adb，可用其他电脑复制同一个配置：
-
-```bash
-adb devices
-adb push configs/orbbec_video_source.yml /sdcard/Android/data/com.xrobotoolkit.client/files/video_source.yml
-```
-
-重启头显 XRoboToolkit 客户端，让它重新读取配置。客户端的视频连接地址设为 **`192.168.5.41:13579`**，选择 `ORBBEC_GRID` / `PANORAMA` 并打开视频。画面是 305 的单目 RGB，双眼显示同一画面。相机服务会回连头显请求的 IP/端口，电脑和头显须能双向访问。
-
-先单独验证相机画面（保持终端运行）：
-
-```bash
-cd /home/u22/kyz/idea/pico_software
-/usr/bin/python3 -u -m pico_video.server
-```
-
-看见 `Gemini 305 RGB ready` 后在头显打开视频。不需要再连接 `192.168.5.27` 的旧 Jetson 视频服务。若 RGB 编号识别错误，用 `v4l2-ctl --list-devices`、`v4l2-ctl -d /dev/videoN --list-formats` 找到 `MJPG` 节点，添加 `--device /dev/videoN`。关闭其他占用相机的程序。超过 1 秒无新帧时画面显示 `CAMERA STALE`。
-
-#### 5. 日常启动：选择单双臂，A 键录制（VR 不显示相机）
+#### 4. 日常启动：选择单双臂，A 键录制（VR 不显示相机）
 
 若单独启动过相机服务，先结束它，再执行：
+
+<a id="piper-dual-record"></a>
+
+##### 双臂遥操 + A 键录制
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
@@ -141,17 +130,29 @@ bash start_piper_x.sh --mode dual --enable-hardware \
   --rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5
 ```
 
-启动脚本默认双臂，建议仍显式写 `--mode dual`。单臂可任选一侧：
+启动脚本默认双臂，建议仍显式写 `--mode dual`。左手柄控制 `can0`，右手柄控制 `can1`；如接线相反，交换两个 channel 参数。
+
+<a id="piper-single-record"></a>
+
+##### 单臂右臂遥操 + A 键录制
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-# 只遥操右臂
+export DISPLAY="${DISPLAY:-:1}"
 bash start_piper_x.sh --mode single --controller-side right --channel can1 --enable-hardware
-# 或只遥操左臂
+```
+
+##### 单臂左臂遥操 + A 键录制
+
+```bash
+cd /home/u22/kyz/idea/pico_software
+export DISPLAY="${DISPLAY:-:1}"
 bash start_piper_x.sh --mode single --controller-side left --channel can0 --enable-hardware
 ```
 
 单臂只连接选定的 CAN，不需要另一台机器人上电。双臂共用一个 XR 连接，各有独立 IK、GRIP 接管与 TRIGGER 夹爪控制；先验证两臂只读反馈，再使能。任一臂反馈异常或所需手柄失效时，结束整个会话并断开两路 CAN。
+
+##### 操作按键、录制目录与 TCP 定义（单双臂通用）
 
 上述命令默认启动本机 305 JPEG 采集和 A 键录制功能，**不启动 VR 视频**。按右手柄 **A** 开始一个 episode，再按 **A** 结束并落盘；按住不重复触发。左手柄 **X** 标记下一子任务。录制独立于 GRIP，松开 GRIP 时仍会记录。
 
@@ -179,9 +180,13 @@ bash start_piper_x.sh --mode single --controller-side left --channel can0 --enab
 
 退出一体启动会清理其相机进程；机器人只断开通信，保留电机使能状态。头显数据超过 500 ms 不更新、CAN 反馈超过 300 ms 或跟踪异常都会结束遥操。软件退出不能替代实物急停；首次运动需固定底座、低速验证方向，并保持急停可触及。
 
-#### 6. 不开相机、不录制，只启动真机遥操
+<a id="piper-no-camera"></a>
+
+#### 5. 不开相机、不录制，只启动真机遥操
 
 完成 PC Service、PICO 连接、CAN 启用和只读反馈检查后，执行：
+
+##### 双臂纯遥操
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
@@ -191,7 +196,49 @@ bash start_piper_x.sh --mode dual --no-camera --enable-hardware \
   --rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5
 ```
 
-`--no-camera` 同时关闭相机启动和录制功能，此模式 A 键不录制。`--no-video` 仅关闭 VR 视频，仍保留相机采集与 A 键录制。单臂纯遥操可改用 `--mode single --controller-side right --channel can1`。头显仍需连接 PC Service 提供手柄数据；各自 GRIP 接管、TRIGGER 控夹爪、B / Ctrl+C 退出整个会话。如果此前单独启动过相机服务，先在其终端按 Ctrl+C 关闭；此参数不会停止已有的相机进程。
+##### 单臂右臂纯遥操
+
+```bash
+cd /home/u22/kyz/idea/pico_software
+export DISPLAY="${DISPLAY:-:1}"
+bash start_piper_x.sh --mode single --controller-side right --channel can1 \
+  --no-camera --enable-hardware
+```
+
+##### 单臂左臂纯遥操
+
+```bash
+cd /home/u22/kyz/idea/pico_software
+export DISPLAY="${DISPLAY:-:1}"
+bash start_piper_x.sh --mode single --controller-side left --channel can0 \
+  --no-camera --enable-hardware
+```
+
+`--no-camera` 同时关闭相机启动和录制功能，此模式 A 键不录制。`--no-video` 仅关闭 VR 视频，仍保留相机采集与 A 键录制。头显仍需连接 PC Service 提供手柄数据；各自 GRIP 接管、TRIGGER 控夹爪、B / Ctrl+C 退出整个会话。如果此前单独启动过相机服务，先在其终端按 Ctrl+C 关闭；此参数不会停止已有的相机进程。
+
+<a id="piper-vr-video"></a>
+
+#### 6. 可选：相机画面配置到头显
+
+日常遥操和 A 键录制无需在 VR 里看相机，本步骤可以跳过。默认启动只为录制采集 305 图像，不开启头显视频；需要显示时才配置本节，并给第 4 节的单双臂启动命令添加 `--video`。
+
+在有 adb 且已连接 PICO 的电脑上执行以下命令；本机目前未安装 adb，可用其他电脑复制同一个配置：
+
+```bash
+adb devices
+adb push configs/orbbec_video_source.yml /sdcard/Android/data/com.xrobotoolkit.client/files/video_source.yml
+```
+
+重启头显 XRoboToolkit 客户端，让它重新读取配置。客户端的视频连接地址设为 **`192.168.5.41:13579`**，选择 `ORBBEC_GRID` / `PANORAMA` 并打开视频。画面是 305 的单目 RGB，双眼显示同一画面。相机服务会回连头显请求的 IP/端口，电脑和头显须能双向访问。
+
+先单独验证相机画面（保持终端运行）：
+
+```bash
+cd /home/u22/kyz/idea/pico_software
+/usr/bin/python3 -u -m pico_video.server
+```
+
+看见 `Gemini 305 RGB ready` 后在头显打开视频。不需要再连接 `192.168.5.27` 的旧 Jetson 视频服务。若 RGB 编号识别错误，用 `v4l2-ctl --list-devices`、`v4l2-ctl -d /dev/videoN --list-formats` 找到 `MJPG` 节点，添加 `--device /dev/videoN`。关闭其他占用相机的程序。超过 1 秒无新帧时画面显示 `CAMERA STALE`。验证完成后先 Ctrl+C 结束独立相机服务，再使用一体启动命令。
 
 #### 7. 无头显链路检查
 
