@@ -64,6 +64,40 @@ class FakeArm:
 
 
 class DualPiperTest(unittest.TestCase):
+    def test_startup_waits_past_five_seconds_and_for_both_hands(self):
+        xr = FakeXR()
+        clock = [0.0]
+        def pose(name):
+            valid = clock[0] >= (12 if name == "left_controller" else 6)
+            return np.array([0, 0, 0, 0, 0, 0, float(valid)])
+        xr.get_pose_by_name = pose
+        with patch.object(entry.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(entry.time, "sleep", side_effect=lambda _: clock.__setitem__(0, clock[0] + 1)), \
+             patch.object(entry, "PiperXCanArm") as can:
+            entry.wait_for_pico(xr, ("left", "right"))
+            can.assert_not_called()
+        self.assertEqual(clock[0], 12)
+
+    def test_frozen_packets_do_not_pass_startup_wait(self):
+        xr = FakeXR()
+        xr.get_timestamp_ns = lambda: 123
+        clock = [0.0]
+        with patch.object(entry.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(entry.time, "sleep", side_effect=lambda _: clock.__setitem__(0, clock[0] + 1)):
+            with self.assertRaisesRegex(RuntimeError, "after 3 seconds"):
+                entry.wait_for_pico(xr, ("right",), timeout=3)
+
+    def test_cancel_wait_closes_xr_without_opening_can(self):
+        xr = FakeXR()
+        with patch("xrobotoolkit_teleop.common.xr_client.XrClient", return_value=xr), \
+             patch.object(entry, "TeleopArm", return_value=SimpleNamespace(arm=None)), \
+             patch.object(entry, "wait_for_pico", side_effect=KeyboardInterrupt), \
+             patch.object(entry, "PiperXCanArm") as can:
+            with self.assertRaises(KeyboardInterrupt):
+                entry.main(mode="dual", enable_hardware=True)
+            can.assert_not_called()
+        self.assertTrue(xr.closed)
+
     def test_live_feedback_failure_closes_both_arms_before_any_new_command(self):
         xr = FakeXR()
         live = {"can0": FakeArm(), "can1": FakeArm()}

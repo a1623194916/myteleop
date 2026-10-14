@@ -22,6 +22,7 @@ while (( $# )); do
       echo 'Use --left-channel/--right-channel to change the mapping, or --channel in single mode.'
       echo '--no-camera disables capture/recording; --video enables optional headset video.'
       echo '--read-only checks feedback without motor enable; --enable-hardware enables real teleoperation.'
+      echo 'Waits indefinitely for PICO before enabling motors; --pico-wait-timeout SECONDS sets a limit.'
       exit 0 ;;
     --record) record_enabled=true ;;
     --no-record) record_enabled=false ;;

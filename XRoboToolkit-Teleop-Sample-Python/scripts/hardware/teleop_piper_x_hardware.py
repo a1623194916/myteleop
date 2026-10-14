@@ -39,6 +39,34 @@ def validate_controller(xr, side):
             raise RuntimeError(f"{side} controller {key} is non-finite")
 
 
+def wait_for_pico(xr, sides, timeout=0.0):
+    """Wait for a new packet with all selected hands valid, before opening CAN."""
+    started = time.monotonic()
+    timestamp = xr.get_timestamp_ns()
+    next_status = started + 10.0
+    print(f"Waiting for PICO ({', '.join(sides)}); connect headset to PC Service at any time. "
+          "Motors are not enabled by this process; Ctrl+C cancels.", flush=True)
+    while True:
+        now = time.monotonic()
+        current = xr.get_timestamp_ns()
+        if current > 0 and current != timestamp:
+            timestamp = current
+            try:
+                for side in sides:
+                    validate_controller(xr, side)
+            except RuntimeError:
+                pass  # Packets can arrive before all selected controllers are tracked.
+            else:
+                print("PICO ready: live packets and selected controller poses received.", flush=True)
+                return
+        if timeout > 0 and now - started >= timeout:
+            raise RuntimeError(f"No valid live PICO controllers after {timeout:g} seconds")
+        if now >= next_status:
+            print("Still waiting for PICO connection / selected controller tracking...", flush=True)
+            next_status = now + 10.0
+        time.sleep(0.02)
+
+
 class TeleopArm:
     """One arm's IK, clutch and gripper state; XR is shared across both arms."""
 
@@ -126,6 +154,7 @@ def main(
     right_channel: str = "can1",
     left_firmware: str | None = None,
     right_firmware: str | None = None,
+    pico_wait_timeout: float = 0.0,
 ) -> None:
     """Independent GRIP/TRIGGER per arm; A records both; B stops the whole session."""
     selected = select_arms(mode, controller_side, channel, left_channel, right_channel)
@@ -179,14 +208,7 @@ def main(
             recording.cfg.arm_firmware = profiles
             recording.prepare()
 
-        timestamp = xr.get_timestamp_ns()
-        deadline = time.monotonic() + 5
-        while xr.get_timestamp_ns() == timestamp or xr.get_timestamp_ns() <= 0:
-            if time.monotonic() >= deadline:
-                raise RuntimeError("No live PICO packets; connect headset to PC Service first")
-            time.sleep(0.02)
-        for side in selected:
-            validate_controller(xr, side)
+        wait_for_pico(xr, selected, pico_wait_timeout)
         # Check both arms' read-only feedback before enabling either one.
         for side, can_channel in selected.items():
             probe = PiperXCanArm(channel=can_channel, firmware=profiles[side], read_only=True)

@@ -84,6 +84,8 @@ PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_piper_x_mujoco.py --inpu
 
 按本文开头启动 PC Service，头显 XRoboToolkit 客户端连接 `192.168.5.41`。服务已经运行时不要再启动第二份。
 
+也可以先启动下方遥操命令，再连接头显：程序默认持续等待有效 PICO 数据，单臂等待所选手柄，双臂等待两个手柄跟踪有效；等待期间本程序不使能机械臂。每 10 秒提示等待状态，Ctrl+C 取消并清理本次启动的相机进程。需要限制等待时间时添加 `--pico-wait-timeout 60`（秒，默认 `0` 表示无限等待）。连接成功后才检查 CAN 反馈并使能；开始遥操后若头显数据中断超过 500 ms，仍会停止整个会话，需要重新启动。
+
 #### 2. 启用机器人 CAN（本机终端执行一次）
 
 ```bash
