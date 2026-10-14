@@ -1,0 +1,97 @@
+# Piper-X PICO 遥操
+
+本实现使用 AgileX 官方 [`agx_arm_urdf/piper_x`](https://github.com/agilexrobotics/agx_arm_urdf/tree/main/piper_x) 的六轴 URDF 和 `piper_x_with_gripper_description.xacro`：仿真里的夹爪底座、两片手指、网格和关节位置均来自官方模型，不再使用替代方块。官方 xacro 的虚拟 `gripper` 关节只用于 mimic；MuJoCo 使用它所驱动的 `gripper_joint1/2` 两个实际手指关节，并按开口宽度分别设置正、负一半行程。`piper_ros/noetic` 中的 `piper_description` 是普通 Piper，不是 Piper-X，不能替换此模型。模型首次运行时按固定提交下载 URDF、xacro 和碰撞网格到 `assets/piper_x/generated/`，后续离线复用。参考的 [piper-X MuJoCo 示例](https://github.com/AB-pixel-pixel/piper-X) 也采用 AgileX 的 Piper-X URDF。
+
+GitHub 上另外核对了 [piper-robot-server](https://github.com/TactileRoboticsAI/piper-robot-server) 的 VR 遥操/70 mm 夹爪宽度约定和 [piper-quest3-teleop](https://github.com/InhyeokHwang/piper-quest3-teleop) 的夹爪命令边界；这两个项目面向普通 Piper，不能直接复用它们的 Piper-X 运动学或驱动参数。默认最大开口 `0.07 m` 与当前真机入口一致；官方模型关节上限允许到 `0.10 m`，确有该行程的夹爪可用仿真参数 `--gripper-max-width 0.1` 调整，真机参数须按实物确认。
+
+AgileX 的 [questVR_ws](https://github.com/agilexrobotics/questVR_ws/blob/master/src/oculus_reader/scripts/teleop_single_piper.py) 也采用“第六轴后加工具坐标”的 IK，并将夹爪开口拆分为两个手指各半行程。它的模型是普通 Piper，代码中的 0.13 m 末端变换不适用于 Piper-X；本仿真根据官方 Piper-X 手指网格在 `link6` 后定义 `piper_x_tcp`（沿局部 z 轴 0.105 m），IK 和目标小球均绑定这一帧。此偏移代表两指工作区中心，**真机上的抓取 TCP 仍须用实物标定**。仿真腕部执行器加入阻尼并消除重叠网格的自接触，针对 8 cm 手柄阶跃的无头测试要求小球与实际 TCP 在稳定后相距小于 15 mm；这是自由空间跟随验证，不是碰撞安全认证。
+
+## 先跑 MuJoCo 遥操
+
+以下命令在有图形桌面的机器上运行；首次启动会从 GitHub 下载官方 Piper-X URDF 和网格。**仿真无需接 CAN、无需开启机械臂。**
+
+### 1. 假输入无头自检（无需 PICO、无需窗口）
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_piper_x_mujoco.py \
+  --input-source fake --headless-duration 2
+```
+
+看到 `Piper-X headless simulation completed` 即表示模型和控制循环能启动。`--headless-duration` 会关闭图形窗口；**想看 MuJoCo 画面不要带这个参数**。
+
+### 2. 假输入窗口（先确认画面）
+
+```bash
+export DISPLAY="${DISPLAY:-:1}"  # 保留已有图形会话；未设置时沿用本机常用的 :1
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_piper_x_mujoco.py --input-source fake
+```
+
+这会打开 MuJoCo 窗口并让假手柄持续提供小幅运动，用于检查机械臂和目标球能正常显示；不需要 XRoboToolkit PC Service。关闭窗口或按 Ctrl+C 退出。
+
+### 3. 启动 PICO 服务（另一终端）
+
+先在接收 PICO 数据的电脑上启动 PC Service，并确认头显连接：
+
+```bash
+cd /opt/apps/roboticsservice
+bash runService.sh
+```
+
+服务保持运行。在另一个终端检查 PICO 链路：
+
+```bash
+cd /home/u22/kyz/pico_software
+XRoboToolkit-Teleop-Sample-Python/.venv/bin/python test_pico_xrt_pipeline.py
+```
+
+### 4. PICO 驱动的 MuJoCo 遥操（新终端）
+
+```bash
+export DISPLAY="${DISPLAY:-:1}"
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+PYTHONPATH=. .venv/bin/python scripts/simulation/teleop_piper_x_mujoco.py --input-source pico
+```
+
+MuJoCo 窗口打开后，按住右手柄 GRIP 并移动手柄，仿真机械臂跟随；松开 GRIP 停止接管，重新握持可重定中心。右手柄 TRIGGER 控制仿真夹爪（松开张开、按下闭合）。退出时关闭窗口或按 Ctrl+C。如果窗口未出现，先确认 `DISPLAY` 指向可用的图形会话；如果机械臂不动，先用上一步检查 PICO 链路和右手柄 GRIP。模型/控制回归可另跑：
+
+```bash
+cd /home/u22/kyz/pico_software/XRoboToolkit-Teleop-Sample-Python
+.venv/bin/python -m unittest discover -s tests -p test_piper_x_teleop.py -v
+```
+
+## 再连接真机
+
+真机脚本使用 `pyAgxArm`，不需要启动 ROS 节点；不要同时运行 `piper_ros` 控制节点或其他占用同一 CAN 通道的程序。安装与本实现核对过的驱动版本：
+
+```bash
+uv pip install --python .venv/bin/python 'pyAgxArm @ git+https://github.com/agilexrobotics/pyAgxArm.git@4b0f06585db3324222616999afeda9037df2e8bd'
+```
+
+把机器人牢固固定，清空运动范围，确认急停可触及。按硬件说明设置 SocketCAN 1 Mbit/s（需要主机 sudo 权限），并检查机器人上电、反馈报文持续更新：
+
+```bash
+sudo ip link set can0 down
+sudo ip link set can0 type can bitrate 1000000
+sudo ip link set can0 up
+ip -details link show can0
+candump -n 5 can0
+.venv/bin/python scripts/hardware/teleop_piper_x_hardware.py
+```
+
+最后一条仅打印预检信息，不连接 CAN、不使能电机。可添加 `--read-only --channel can0` 读取十次关节反馈，该模式不使能、不配置速度、不初始化夹爪。先核实关节方向、固件和夹爪最大开度与真实设备相符，再在有人监护、低速且急停就绪时明确启用：
+
+```bash
+.venv/bin/python scripts/hardware/teleop_piper_x_hardware.py --enable-hardware --channel can0
+```
+
+按住右手 GRIP 才发送关节目标，TRIGGER 控制夹爪；按 B 停止。默认 20 Hz、每周期最多 0.35 度、厂商速度设置为 10%。反馈超过 300 ms、失联、故障、关节越界或跟踪误差超过 0.2 rad 时退出。退出只断开 CAN，不执行断电、复位或回零；电机可能继续保持当前位置。不要把软件停止当作急停。可用 `--firmware` 指定已确认的驱动固件档位，`--gripper-max-width` 必须按实际夹爪行程设置。
+
+启动会先等待 PICO 时间戳更新，再使能电机；运行中头显时间戳超过 500 ms 不更新即退出。
+
+## 本机 Gemini 305 画面与一体启动
+
+在仓库根目录执行 `bash start_piper_x.sh --enable-hardware --channel can0`，启动 USB RGB 采集、A 键录制和真机遥操，默认不向 VR 推视频。右手柄 A 按一次开始 episode，再按一次结束并落盘。采集服务使用系统 Python/GStreamer，控制服务使用 `.venv`，图像编码不会占用遥操进程。`--no-camera` 用于不开相机、不录制的纯遥操；`--video` 才开启可选头显视频，地址为 `192.168.5.41:13579`。录制字段、TCP 解释、CAN 启用和测试完整步骤见 [run.md](../../run.md)。
+
+**验证范围：**无头 MuJoCo 和假 CAN 驱动单测已验证，本机 305 RGB 已读取；CAN 启用和有效头显连接尚未就绪，真机方向、固件兼容性、运动极限和安全距离仍需现场确认。

@@ -12,11 +12,16 @@ import zmq
 class OrbbecImageClient:
     def __init__(self, host: str, port: int, timeout_ms: int = 300):
         self._ctx = zmq.Context()
+        self._host, self._port, self._timeout_ms = host, port, timeout_ms
+        self._open_socket()
+        self.last_meta = None
+
+    def _open_socket(self):
         self._sock = self._ctx.socket(zmq.REQ)
         self._sock.setsockopt(zmq.LINGER, 0)
-        self._sock.setsockopt(zmq.RCVTIMEO, timeout_ms)
-        self._sock.connect(f"tcp://{host}:{port}")
-        self.last_meta = None
+        self._sock.setsockopt(zmq.RCVTIMEO, self._timeout_ms)
+        self._sock.setsockopt(zmq.SNDTIMEO, self._timeout_ms)
+        self._sock.connect(f"tcp://{self._host}:{self._port}")
 
     def fetch_frames(self):
         """拉取所有相机最新一帧。
@@ -31,6 +36,10 @@ class OrbbecImageClient:
             self._sock.send_string("GET")
             parts = self._sock.recv_multipart()
         except zmq.ZMQError:
+            # REQ cannot send another GET after a receive timeout. Recreate it
+            # so capture can recover when the camera service comes back.
+            self._sock.close(linger=0)
+            self._open_socket()
             return None, None
         if not parts:
             return None, None

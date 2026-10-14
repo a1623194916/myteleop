@@ -34,6 +34,9 @@ Use the following instructions to run example scripts. For a more detailed descr
 
 ### Running the MuJoCo Simulation Demo
 
+For Piper-X simulation and the guarded SocketCAN hardware workflow, see
+[`docs/piper_x_teleop.md`](docs/piper_x_teleop.md).
+
 To run the teleoperation demo with a UR5e robot in MuJoCo simulation:
 
 ```bash

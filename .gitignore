@@ -4,3 +4,4 @@ __pycache__/
 *.egg-info/
 logs/
 NG01_v4/
+XRoboToolkit-Teleop-Sample-Python/assets/piper_x/generated/

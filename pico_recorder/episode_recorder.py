@@ -37,7 +37,8 @@ class EpisodeRecorder:
     """固定频率(默认 30Hz)采样到单个 HDF5, 采样内容由 getters 注入。"""
 
     def __init__(self, root_dir, task, episode_id, rate=30.0,
-                 getters=None, extra_fn=None, orbbec_client=None):
+                 getters=None, extra_fn=None, orbbec_client=None,
+                 snapshot_fn=None, metadata=None):
         """
         Args:
             root_dir:  数据集根目录。
@@ -56,6 +57,8 @@ class EpisodeRecorder:
         self.getters = dict(getters or {})
         self.extra_fn = extra_fn or (lambda: {})
         self.orbbec = orbbec_client
+        self.snapshot_fn = snapshot_fn
+        self.metadata = dict(metadata or {})
 
         self._stop = threading.Event()
         self._thread = None
@@ -77,7 +80,7 @@ class EpisodeRecorder:
     def start(self):
         os.makedirs(self.ep_dir, exist_ok=True)
         self.started_at_ns = time.time_ns()
-        self._h5 = h5py.File(str(self.h5_path), "w")
+        self._h5 = h5py.File(str(self.h5_path), "x")
         self._thread = threading.Thread(target=self._run, daemon=True,
                                         name=f"recorder-{self.episode_id}")
         self._thread.start()
@@ -88,6 +91,8 @@ class EpisodeRecorder:
         self._stop.set()
         if self._thread is not None:
             self._thread.join(timeout=self.period * 4 + 1.0)
+            if self._thread.is_alive():
+                raise RuntimeError("Recorder still sampling; refusing to close HDF5 under its worker")
         self.ended_at_ns = time.time_ns()
         try:
             self._write_meta()
@@ -111,7 +116,7 @@ class EpisodeRecorder:
                 deadline += self.period
                 delta = deadline - time.monotonic()
                 if delta > 0:
-                    time.sleep(delta)
+                    self._stop.wait(delta)
                 elif delta < -self.period:      # 调度卡顿, 对齐到下一节拍
                     deadline = time.monotonic() + self.period
         except Exception as e:
@@ -131,9 +136,9 @@ class EpisodeRecorder:
         # 标量 -> (None,), 向量 -> (None, k)
         out_shape = (None,) + value_shape
         ds = self._h5.create_dataset(
-            f"v/{name}", shape=(0,) + value_shape,
+            f"v/{name}", shape=(self.step_count,) + value_shape,
             maxshape=(None,) + value_shape,
-            dtype=np.float32, chunks=(4096,) + value_shape, compression="gzip",
+            dtype=np.float32, chunks=(4096,) + value_shape, compression="gzip", fillvalue=np.nan,
         )
         self._cols[name] = ds
         self._field_names.append(name)
@@ -142,7 +147,8 @@ class EpisodeRecorder:
         now = time.time_ns()
         t_rel = (now - self.started_at_ns) / 1e9
 
-        values = {}
+        # A single strict snapshot keeps all Piper state fields on the same tick.
+        values = dict(self.snapshot_fn()) if self.snapshot_fn else {}
         for key, src in self.getters.items():
             try:
                 values[key] = src()
@@ -153,25 +159,32 @@ class EpisodeRecorder:
         except Exception:
             pass
 
+        # Read camera before appending any columns, so failures leave complete rows.
+        frames = {}
+        if self.orbbec is not None:
+            _, frames = self.orbbec.fetch_frames()
+            frames = frames or {}
+
         for name, val in values.items():
             if val is None:
                 continue
             self._ensure_col(name, val)
-            if name in self._cols:
-                self._save_col(name, np.asarray(val, dtype=np.float32))
+        for name, ds in self._cols.items():
+            if name == "timestamp":
+                continue
+            val = values.get(name)
+            self._add_row(ds, np.asarray(val, dtype=np.float32) if val is not None
+                          else np.full(ds.shape[1:], np.nan, dtype=np.float32))
 
         # 相机帧(VLEN bytes)
-        if self.orbbec is not None:
-            meta, frames = self.orbbec.fetch_frames()
-            if frames:
-                for sn, f in frames.items():
-                    if sn not in self._img_dsets:
-                        self._create_image_col(sn, f.get("w", 0), f.get("h", 0))
-                    jpeg_ds, ns_ds, _, _ = self._img_dsets[sn]
-                    payload = f["jpg"]
-                    self._add_row(jpeg_ds, np.frombuffer(payload, dtype=np.uint8)
-                                  if payload else np.array([], dtype=np.uint8))
-                    self._add_row(ns_ds, np.uint64(f.get("ns", 0)))
+        for sn, f in frames.items():
+            if sn not in self._img_dsets:
+                self._create_image_col(sn, f.get("w", 0), f.get("h", 0))
+        for sn, (jpeg_ds, ns_ds, _, _) in self._img_dsets.items():
+            f = frames.get(sn, {})
+            payload = f.get("jpg", b"")
+            self._add_row(jpeg_ds, np.frombuffer(payload, dtype=np.uint8))
+            self._add_row(ns_ds, np.uint64(f.get("ns", 0)))
 
         # 时间戳列
         self._ensure_col("timestamp", np.float64(0.0))
@@ -196,11 +209,11 @@ class EpisodeRecorder:
 
     def _create_image_col(self, sn, w=0, h=0):
         jpeg_ds = self._h5.create_dataset(
-            f"images/{sn}/jpeg", (0,), maxshape=(None,),
+            f"images/{sn}/jpeg", (self.step_count,), maxshape=(None,),
             dtype=h5py.special_dtype(vlen=np.uint8), compression="gzip",
         )
         ns_ds = self._h5.create_dataset(
-            f"images/{sn}/ns", (0,), maxshape=(None,),
+            f"images/{sn}/ns", (self.step_count,), maxshape=(None,),
             dtype=np.uint64, chunks=(4096,),
         )
         self._img_dsets[sn] = (jpeg_ds, ns_ds, w, h)
@@ -229,6 +242,7 @@ class EpisodeRecorder:
         h5.attrs["joint_names"] = FR3C_JOINT_NAMES
         h5.attrs["camera_serials"] = list(cams)
         h5.attrs["camera_meta"] = json.dumps(img_info, ensure_ascii=False)
+        h5.attrs["recording_metadata"] = json.dumps(self.metadata, ensure_ascii=False)
         meta = {
             "task": self.task,
             "episode_id": self.episode_id,
@@ -239,6 +253,7 @@ class EpisodeRecorder:
             "error": self.error,
             "file": self.h5_path.name,
             "camera_serials": cams,
+            "recording_metadata": self.metadata,
         }
         with open(self.json_path, "w", encoding="utf-8") as fh:
             json.dump(meta, fh, ensure_ascii=False, indent=2)

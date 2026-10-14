@@ -1,0 +1,18 @@
+# Local USB RGB recording. Headset video is disabled by default in start_piper_x.sh.
+task: piper_reach
+output_dir: /home/u22/kyz/datasets
+fps: 30.0
+picosoftware_root: /home/u22/kyz/pico_software
+subtasks: [approach, grasp, lift, place]
+camera:
+  host: 127.0.0.1
+  port: 8765
+  timeout_ms: 300
+  width: 640
+  height: 480
+  serials: [CV2856D0009T]
+buttons:
+  record_toggle: A
+  subtask_mark: X
+  deadman_key: right_grip
+  gripper_key: right_trigger

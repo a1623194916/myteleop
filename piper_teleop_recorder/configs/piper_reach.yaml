@@ -1,0 +1,64 @@
+# PiperX teleop data recorder -- unified configuration.
+#
+# One file holds every tunable for a recording session. The fully-resolved
+# config is written next to each session (recorder_config_<timestamp>.yaml)
+# for provenance. Keys mirror tools/piper_teleop_recorder/recorder_config.py.
+
+# Task / dataset name; episodes land under {output_dir}/{task}/episodes/.
+task: piper_reach
+
+# Predefined, ordered subtask list. Left-X advances the per-frame subtask
+# index through this list (clamped at the last entry; it never wraps).
+subtasks:
+  - approach
+  - grasp
+  - lift
+  - place
+
+# Where raw HDF5 episodes are written (on robot machine 41).
+output_dir: /home/u22/kyz/datasets
+
+# Recording rate (Hz). 30 aligns with the Orbbec 30fps stream.
+fps: 30.0
+
+# picosoftware root added to sys.path so pico_recorder.* is importable.
+picosoftware_root: /home/u22/kyz/pico_software
+
+# Orbbec camera stream served by the Jetson stream_server (ZMQ REQ/REP).
+# PRECONDITION: that server must already be up on host:port (do not start it
+# from here). Images are recorded at width x height.
+camera:
+  host: 192.168.5.27
+  port: 8765
+  timeout_ms: 300
+  width: 640
+  height: 480
+  serials:
+    - CV2R46P00097
+    - CPC85630003C
+
+# PiperX CAN boundary + gripper. firmware: null -> auto-probe the profile.
+can:
+  channel: can0
+  firmware: null
+  speed_percent: 10
+  gripper_max_width: 0.07
+
+# Teleop control thread (MuJoCo IK + bounded JointFollower).
+control:
+  rate_hz: 20.0            # control loop rate
+  max_joint_step_deg: 0.35 # per-tick joint increment bound
+  scale_factor: 0.5        # controller->IK target scale
+  deadman_threshold: 0.9   # right_grip value above this engages teleop
+  poll_rate_hz: 20.0       # button edge-detection poll rate
+
+# Controller button / axis mapping (confirmed requirements).
+#   record_toggle: right A  -> toggle start/stop episode recording
+#   subtask_mark : left  X  -> advance the subtask index
+#   deadman_key  : right GRIP (value > deadman_threshold) -> engage teleop
+#   gripper_key  : right TRIGGER -> gripper opening = 1 - clip(trigger, 0, 1)
+buttons:
+  record_toggle: A
+  subtask_mark: X
+  deadman_key: right_grip
+  gripper_key: right_trigger
