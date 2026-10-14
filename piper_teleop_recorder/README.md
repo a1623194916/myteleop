@@ -1,6 +1,6 @@
 # PiperX Teleop Data Recorder
 
-Teleoperate a single **PiperX** arm with a VR controller and record **30 Hz**
+Teleoperate one or two **PiperX** arms with VR controllers and record **30 Hz**
 episodes (Orbbec images 640×480 + arm state) with **per-frame subtask labels**
 into HDF5, convertible to LeRobot. It reuses the existing picosoftware
 teleop stack on robot machine 41 and is connected to the guarded Piper-X
@@ -12,7 +12,9 @@ For normal use on machine 41, start PC Service, connect PICO and bring CAN up,
 then run from the repository root:
 
 ```bash
-bash start_piper_x.sh --enable-hardware --channel can0
+bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-channel can1
+# Or one arm only:
+bash start_piper_x.sh --mode single --controller-side right --channel can1 --enable-hardware
 ```
 
 This launches the local 305 JPEG service and enables A-key recording. Headset
@@ -20,11 +22,29 @@ video is **off by default**; `--video` opts in. Right A starts an episode and
 the next press stops/finalizes it. B/Ctrl+C finalizes the active episode before
 disconnecting. `--no-camera` selects pure teleoperation with recording disabled.
 
-The current config is `configs/piper_local_305.yaml`: local endpoint
+Dual is the launcher default. Left/right GRIP and TRIGGER operate independent
+arms, sharing one XR client. A toggles one episode containing both arms and
+the shared image. If either selected arm/hand fails, the full session ends.
+Single mode only opens its selected CAN channel. Verify physical hand/CAN
+mapping; interface names do not determine which robot is physically left.
+
+Dual config is `configs/piper_dual_local_305.yaml`; single config is
+`configs/piper_local_305.yaml`. Both use local endpoint
 `127.0.0.1:8765`, camera `CV2856D0009T`, 640×480 JPEG and 30 Hz HDF5 sampling.
 State comes from the hardware control loop (20 Hz by default), so repeated
 snapshots are expected. Files land at
-`/home/u22/kyz/datasets/piper_reach/episodes/ep_XXXXX.h5` plus JSON metadata.
+`/home/u22/kyz/datasets/piper_dual/episodes/ep_XXXXX.h5` (dual) or
+`/home/u22/kyz/datasets/piper_reach/episodes/ep_XXXXX.h5` (single), plus JSON.
+
+In dual mode, every robot field uses `left_` / `right_` prefixes, such as
+`left_joint_rad`, `right_joint_rad`, `left_tcp_flange`, `right_tcp_eef`,
+`left_action_joint_rad` and `right_gripper_m`. Required six-axis/TCP and gripper
+fields from both arms must be present and finite before A can start an episode.
+Metadata includes mode, channel mapping and 12 joint names. Each TCP belongs
+to that arm's own base frame; there is no shared-world transform or inter-arm
+collision check. The single-arm LeRobot converter below is for single mode;
+dual raw fields can be read with `pico_recorder/convert_to_lerobot.py`, whose
+existing action convention is measured joint replay, not recorded command targets.
 
 Both `v/tcp_flange` (SDK flange feedback) and `v/tcp_eef` (flange local +Z
 offset by 0.105 m) are saved in the robot base frame, as metres and extrinsic

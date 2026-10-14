@@ -316,6 +316,9 @@ def run_dry_run(cfg, duration_s=2.2):
         ),
         "gripper_m": lambda: 0.03,
     }
+    if cfg.teleop_mode == "dual":
+        getters = {f"{side}_{key}": getter for side in ("left", "right")
+                   for key, getter in getters.items()}
 
     ctrl_holder = {}
 
@@ -324,6 +327,11 @@ def run_dry_run(cfg, duration_s=2.2):
             cfg.output_dir, cfg.task, episode_id, rate=cfg.fps,
             getters=getters, extra_fn=ctrl_holder["ctrl"].extra_fn,
             orbbec_client=fake_orbbec,
+            metadata={"robot": "piper_x", "teleop_mode": cfg.teleop_mode,
+                      "arm_channels": cfg.arm_channels,
+                      "tcp_offset_m": DEFAULT_TCP_OFFSET_M, "tcp_calibrated": False,
+                      "joint_names": [f"{side}_joint{i}" for side in ("left", "right") for i in range(1, 7)]
+                      if cfg.teleop_mode == "dual" else [f"joint{i}" for i in range(1, 7)]},
         )
         return rec
 
@@ -377,9 +385,9 @@ def _verify_dry_run_output(cfg):
     assert "subtask" in v_keys, "v/subtask column missing"
     assert "right_trigger" in v_keys, "v/right_trigger column missing"
     assert "right_grip" in v_keys, "v/right_grip column missing"
-    assert "joint_rad" in v_keys, "v/joint_rad column missing"
-    assert "tcp_flange" in v_keys, "v/tcp_flange column missing"
-    assert "tcp_eef" in v_keys, "v/tcp_eef column missing"
+    for prefix in (("left_", "right_") if cfg.teleop_mode == "dual" else ("",)):
+        for field in ("joint_rad", "tcp_flange", "tcp_eef"):
+            assert prefix + field in v_keys, f"v/{prefix}{field} column missing"
     assert "timestamp" in v_keys, "v/timestamp column missing"
     assert img_serials, "no image columns written"
     assert n > 0, "no frames recorded"
@@ -407,10 +415,17 @@ def run_hardware(cfg, enable_hardware=False):
 
     config_path = _save_session_config(cfg)
     teleop_main(
-        channel=cfg.can.channel, enable_hardware=True, firmware=cfg.can.firmware,
+        channel=cfg.can.channel if cfg.teleop_mode == "single" else None,
+        enable_hardware=True, firmware=cfg.can.firmware,
         rate_hz=cfg.control.rate_hz, max_joint_step_deg=cfg.control.max_joint_step_deg,
         scale_factor=cfg.control.scale_factor, speed_percent=cfg.can.speed_percent,
         gripper_max_width=cfg.can.gripper_max_width, record_config=config_path,
+        mode=cfg.teleop_mode,
+        controller_side=cfg.buttons.deadman_key.split("_")[0],
+        left_channel=cfg.arm_channels.get("left", "can0"),
+        right_channel=cfg.arm_channels.get("right", "can1"),
+        left_firmware=cfg.arm_firmware.get("left"),
+        right_firmware=cfg.arm_firmware.get("right"),
     )
 
 # --------------------------------------------------------------------------- #

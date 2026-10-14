@@ -239,7 +239,7 @@ class EpisodeRecorder:
         h5.attrs["steps"] = self.step_count
         h5.attrs["error"] = str(self.error)
         h5.attrs["state_field_names"] = list(self._field_names)
-        h5.attrs["joint_names"] = FR3C_JOINT_NAMES
+        h5.attrs["joint_names"] = self.metadata.get("joint_names", FR3C_JOINT_NAMES)
         h5.attrs["camera_serials"] = list(cams)
         h5.attrs["camera_meta"] = json.dumps(img_info, ensure_ascii=False)
         h5.attrs["recording_metadata"] = json.dumps(self.metadata, ensure_ascii=False)

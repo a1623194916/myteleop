@@ -1,0 +1,20 @@
+# One episode contains both Piper-X arms and the shared Gemini 305 image.
+task: piper_dual
+output_dir: /home/u22/kyz/datasets
+fps: 30.0
+picosoftware_root: /home/u22/kyz/pico_software
+teleop_mode: dual
+arm_channels:
+  left: can0
+  right: can1
+subtasks: [approach, grasp, lift, place]
+camera:
+  host: 127.0.0.1
+  port: 8765
+  timeout_ms: 300
+  width: 640
+  height: 480
+  serials: [CV2856D0009T]
+buttons:
+  record_toggle: A
+  subtask_mark: X

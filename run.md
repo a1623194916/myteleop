@@ -3,7 +3,7 @@
 按机械臂选择对应章节；每章集中说明仿真、真机启动、操作方式及相关相机/采集流程。
 
 - [公共准备：PICO 与 PC Service](#common)
-- [Piper-X 单臂遥操指南](#piper-x)
+- [Piper-X 单臂与双臂遥操指南](#piper-x)
 - [FR3C 单臂与双臂遥操指南](#fr3c)
 - [UR5 单臂遥操指南](#ur5)
 - [开发工具](#development)
@@ -34,7 +34,7 @@ XRoboToolkit-Teleop-Sample-Python/.venv/bin/python test_pico_xrt_pipeline.py
 
 <a id="piper-x"></a>
 
-## Piper-X 单臂遥操指南
+## Piper-X 单臂与双臂遥操指南
 
 建议先完成仿真验证，再启用 CAN、检查真实反馈并启动真机遥操。详细模型与驱动说明见 [Piper-X 专项指南](XRoboToolkit-Teleop-Sample-Python/docs/piper_x_teleop.md)。
 
@@ -86,16 +86,26 @@ sudo ip link set can0 up
 ip -details link show can0
 ```
 
-当前电脑有 `can0` 和 `can1` 两个适配器；这里使用 `can0`，若 Piper-X 接在另一只适配器，替换以上接口和后续 `--channel`。不要同时运行其他 Piper 控制程序。
+双臂还需启用 `can1`（已 UP 且 1 Mbit/s 时无需重复配置）：
+
+```bash
+sudo ip link set can1 down
+sudo ip link set can1 type can bitrate 1000000
+sudo ip link set can1 up
+ip -details link show can1
+```
+
+默认左手柄 → `can0`、右手柄 → `can1`。接口编号不能证明机器人在桌面上的左右位置，必须按接线核对；需要交换时使用 `--left-channel can1 --right-channel can0`。不要同时运行其他 Piper 控制程序。
 
 #### 3. 只读检查反馈（不使能、不运动）
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-bash start_piper_x.sh --no-camera --read-only --channel can0
+bash start_piper_x.sh --mode dual --no-camera --read-only \
+  --left-channel can0 --right-channel can1
 ```
 
-应连续输出十次六轴实测角度。读不到反馈先检查接口、上电和接线；不要直接启动运动。
+应连续输出十次两台机械臂各自的六轴实测角度。只检查一台时使用 `--mode single --controller-side left --channel can0` 或 `--mode single --controller-side right --channel can1`。读不到反馈先检查接口、上电和接线；不要直接启动运动。
 
 #### 4. 可选：相机画面配置到头显
 
@@ -119,36 +129,51 @@ cd /home/u22/kyz/idea/pico_software
 
 看见 `Gemini 305 RGB ready` 后在头显打开视频。不需要再连接 `192.168.5.27` 的旧 Jetson 视频服务。若 RGB 编号识别错误，用 `v4l2-ctl --list-devices`、`v4l2-ctl -d /dev/videoN --list-formats` 找到 `MJPG` 节点，添加 `--device /dev/videoN`。关闭其他占用相机的程序。超过 1 秒无新帧时画面显示 `CAMERA STALE`。
 
-#### 5. 日常启动：真机遥操与 A 键录制（VR 不显示相机）
+#### 5. 日常启动：选择单双臂，A 键录制（VR 不显示相机）
 
 若单独启动过相机服务，先结束它，再执行：
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
 export DISPLAY="${DISPLAY:-:1}"
-bash start_piper_x.sh --enable-hardware --channel can0 \
+bash start_piper_x.sh --mode dual --enable-hardware \
+  --left-channel can0 --right-channel can1 \
   --rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5
 ```
 
-该命令默认启动本机 305 JPEG 采集和 A 键录制功能，**不启动 VR 视频**。按右手柄 **A** 开始一个 episode，再按 **A** 结束并落盘；按住不重复触发。左手柄 **X** 标记下一子任务。录制独立于 GRIP，松开 GRIP 时仍会记录。
+启动脚本默认双臂，建议仍显式写 `--mode dual`。单臂可任选一侧：
 
-文件保存在 `/home/u22/kyz/datasets/piper_reach/episodes/ep_XXXXX.h5`，同时生成 `.json` 元数据。任务名、输出目录、录制频率及相机序列号见 `piper_teleop_recorder/configs/piper_local_305.yaml`。
+```bash
+cd /home/u22/kyz/idea/pico_software
+# 只遥操右臂
+bash start_piper_x.sh --mode single --controller-side right --channel can1 --enable-hardware
+# 或只遥操左臂
+bash start_piper_x.sh --mode single --controller-side left --channel can0 --enable-hardware
+```
+
+单臂只连接选定的 CAN，不需要另一台机器人上电。双臂共用一个 XR 连接，各有独立 IK、GRIP 接管与 TRIGGER 夹爪控制；先验证两臂只读反馈，再使能。任一臂反馈异常或所需手柄失效时，结束整个会话并断开两路 CAN。
+
+上述命令默认启动本机 305 JPEG 采集和 A 键录制功能，**不启动 VR 视频**。按右手柄 **A** 开始一个 episode，再按 **A** 结束并落盘；按住不重复触发。左手柄 **X** 标记下一子任务。录制独立于 GRIP，松开 GRIP 时仍会记录。
+
+双臂文件保存在 `/home/u22/kyz/datasets/piper_dual/episodes/ep_XXXXX.h5`，一个 episode 同时包含两臂状态和共享的 305 图像；配置为 `piper_teleop_recorder/configs/piper_dual_local_305.yaml`。单臂保存在 `/home/u22/kyz/datasets/piper_reach/episodes/ep_XXXXX.h5`，配置为 `piper_local_305.yaml`。同时生成 `.json` 元数据，记录单双臂模式、手柄/CAN 映射和 TCP 定义。
 
 | 字段 | 含义 |
 | --- | --- |
-| `v/joint_rad` | 六轴实测关节角，rad |
-| `v/action_joint_rad` | 最近实际发送到 CAN 的关节目标，rad |
-| `v/tcp_flange` | SDK 法兰位姿，机器人基坐标系，位置 m、XYZ 外旋欧拉角 rad |
-| `v/tcp_eef` | 法兰沿局部 +Z 偏移 0.105 m 得到的夹爪工作中心，姿态与法兰相同 |
-| `v/gripper_m` / `v/action_gripper_m` | 实测夹爪开度 / 最近夹爪目标，m |
-| `v/right_trigger` / `v/right_grip` / `v/teleop_active` / `v/subtask` | 手柄与接管、子任务状态 |
+| `v/left_joint_rad` / `v/right_joint_rad` | 左右臂各六轴实测关节角，rad |
+| `v/left_action_joint_rad` / `v/right_action_joint_rad` | 左右臂最近实际发送到 CAN 的关节目标，rad |
+| `v/left_tcp_flange` / `v/right_tcp_flange` | 各自基坐标系的 SDK 法兰位姿，位置 m、XYZ 外旋欧拉角 rad |
+| `v/left_tcp_eef` / `v/right_tcp_eef` | 各自法兰沿局部 +Z 偏移 0.105 m 的夹爪工作中心 |
+| `v/left_gripper_m` / `v/right_gripper_m` 及对应 `*_action_gripper_m` | 各自实测夹爪开度 / 最近夹爪目标，m |
+| `v/left_trigger` / `v/right_trigger`、`*_grip`、`*_teleop_active` / `v/subtask` | 两手柄、各自接管与公共子任务状态 |
 | `images/CV2856D0009T/jpeg` / `ns` | 640×480 JPEG 与图像采集墙钟时间戳（ns） |
+
+上表为双臂字段；单臂保留无侧别前缀的 `joint_rad`、`action_joint_rad`、`tcp_flange`、`tcp_eef`、`gripper_m`、`action_gripper_m` 和 `teleop_active`，手柄字段使用所选侧的 `left_*` 或 `right_*`。两臂 TCP 分属各自基坐标系，没有变换到共同世界坐标系，也没有两臂互碰检查，需隔离运动空间。
 
 `tcp_eef` 的 105 mm 是模型定义，**尚未实物标定**，该状态写入录制元数据。HDF5 同时保留法兰和夹爪中心，避免混淆。默认 30 Hz 落盘，机器人状态来自 20 Hz 控制循环的最新快照，不能将它视为 30 Hz 独立机器人反馈；图像时间戳可辨别重复采样。
 
 录制开始前检查相机和机器人状态；相机超过 1 秒无新帧、机器人快照超过 300 ms 或字段缺失时，拒绝开始或结束当前 episode 并保留错误信息。相机故障停止录制，机械臂遥操仍继续；恢复后需重新按 A 开始。B / Ctrl+C 退出会结束正在录制的 episode。
 
-相机与 CAN/IK 各用独立进程。启动先检查相机，再要求收到持续更新的 PICO 数据，随后才使能机器人。按住**右手 GRIP**接管机械臂，松开停止发送，重新握持重定中心；**右手 TRIGGER**控制夹爪，**B / Ctrl+C**退出。启动不回零、不先移动到仿真 home，而是每周期从真实关节反馈计算 IK。默认夹爪最大开口 70 mm，按实物可调整 `--gripper-max-width`。
+相机与 CAN/IK 各用独立进程。启动先检查相机，再要求收到持续更新的 PICO 数据，随后才使能机器人。按住各自手柄 **GRIP** 接管对应臂，松开停止发送，重新握持重定中心；各自 **TRIGGER** 控夹爪，**B / Ctrl+C**退出整个会话。启动不回零、不先移动到仿真 home，而是每周期从真实关节反馈计算 IK。默认夹爪最大开口 70 mm，按实物可调整 `--gripper-max-width`。
 
 若需要 VR 内显示相机，给同一命令添加 `--video`；否则保持默认即可。
 
@@ -161,11 +186,12 @@ bash start_piper_x.sh --enable-hardware --channel can0 \
 ```bash
 cd /home/u22/kyz/idea/pico_software
 export DISPLAY="${DISPLAY:-:1}"
-bash start_piper_x.sh --no-camera --enable-hardware --channel can0 \
+bash start_piper_x.sh --mode dual --no-camera --enable-hardware \
+  --left-channel can0 --right-channel can1 \
   --rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5
 ```
 
-`--no-camera` 同时关闭相机启动和录制功能，此模式 A 键不录制。`--no-video` 仅关闭 VR 视频，仍保留相机采集与 A 键录制。头显仍需连接 PC Service 提供手柄数据；右手 GRIP 接管、TRIGGER 控夹爪、B / Ctrl+C 退出。如果此前单独启动过相机服务，先在其终端按 Ctrl+C 关闭；此参数不会停止已有的相机进程。
+`--no-camera` 同时关闭相机启动和录制功能，此模式 A 键不录制。`--no-video` 仅关闭 VR 视频，仍保留相机采集与 A 键录制。单臂纯遥操可改用 `--mode single --controller-side right --channel can1`。头显仍需连接 PC Service 提供手柄数据；各自 GRIP 接管、TRIGGER 控夹爪、B / Ctrl+C 退出整个会话。如果此前单独启动过相机服务，先在其终端按 Ctrl+C 关闭；此参数不会停止已有的相机进程。
 
 #### 7. 无头显链路检查
 
@@ -176,12 +202,14 @@ cd /home/u22/kyz/idea/pico_software
 # 不用相机的同协议自检
 /usr/bin/python3 -m pico_video.check_stream --fake-camera
 # 真实 305 -> 模拟 A 键开始/结束 -> HDF5；机器人和手柄使用假数据，不使能电机
-XRoboToolkit-Teleop-Sample-Python/.venv/bin/python -m piper_teleop_recorder.check_local_recording
+XRoboToolkit-Teleop-Sample-Python/.venv/bin/python -m piper_teleop_recorder.check_local_recording --mode dual
+# 单臂同链路检查
+XRoboToolkit-Teleop-Sample-Python/.venv/bin/python -m piper_teleop_recorder.check_local_recording --mode single
 ```
 
 依赖：系统 Python 的 `gi`、OpenCV、NumPy，GStreamer 的 `v4l2src`、`jpegdec`、`x264enc`，以及 `v4l2-ctl`、`ffmpeg`。本机已具备这些依赖。新机器可安装 `python3-gi python3-opencv python3-numpy gir1.2-gstreamer-1.0 gstreamer1.0-plugins-good gstreamer1.0-plugins-ugly v4l-utils ffmpeg`。
 
-**现场验证边界（2026-10-14）：**真实 305 已通过两次模拟头显连接，每次 30 帧 H264 回传并解码为 1280×720 RGB；另用真实 305 图像和假机器人/手柄完成两段 A 键录制，每段 19 行状态/JPEG 对齐且解码成功。录制五项单测和 Piper-X 六项回归均通过。两个 CAN 接口发现时均为 DOWN，启用需要本机 sudo 密码；PC Service 的 SDK 当前返回时间戳 0（头显没有提供有效数据）。真实机械臂运动、实际手柄按键录制及头显内最终显示仍需启用 CAN、连接头显后验证。
+**现场验证边界（2026-10-14）：**两路 CAN 已 UP、1 Mbit/s，已成功读取两台真实 Piper-X 的六轴反馈（只读，不使能、不发运动）。真实 305 已完成双臂假状态的两段 A 键 episode，每段 19 行状态/JPEG 对齐且解码成功。实际双臂运动及真实手柄按键录制仍需现场联调；物理左右与 CAN 的对应关系须按接线核对。
 
 <a id="fr3c"></a>
 

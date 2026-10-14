@@ -72,7 +72,12 @@ class PiperXCanArm:
                 probe = AgxArmFactory.create_arm(config("default"))
                 try:
                     probe.connect()
-                    version = (probe.get_firmware() or {}).get("software_version")
+                    deadline = time.monotonic() + 5
+                    version = None
+                    while not version and time.monotonic() < deadline:
+                        version = (probe.get_firmware() or {}).get("software_version")
+                        if not version:
+                            time.sleep(0.1)
                     if not version:
                         raise RuntimeError("Piper-X firmware version unavailable; check CAN or set --firmware")
                     firmware = resolve_firmware_profile("piper_x", version)

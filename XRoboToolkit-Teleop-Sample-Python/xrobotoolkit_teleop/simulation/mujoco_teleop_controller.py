@@ -29,6 +29,7 @@ class MujocoTeleopController(BaseTeleopController):
         dt=0.01,
         mj_qpos_init=None,
         viewer_camera=None,
+        xr_client=None,
     ):
         self.visualize_placo = visualize_placo
         self.xml_path = xml_path
@@ -48,6 +49,7 @@ class MujocoTeleopController(BaseTeleopController):
             scale_factor,
             q_init=None,
             dt=dt,
+            xr_client=xr_client,
         )
 
         if visualize_placo:

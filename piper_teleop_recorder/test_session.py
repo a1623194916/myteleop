@@ -34,6 +34,30 @@ class Camera:
 
 
 class RecordingTest(unittest.TestCase):
+    def test_dual_snapshot_requires_both_arms_and_records_channel_mapping(self):
+        with tempfile.TemporaryDirectory() as root:
+            config = Path(__file__).parent / "configs/piper_dual_local_305.yaml"
+            session = PiperRecordingSession(str(config), Buttons(), 0.105,
+                                            arm_channels={"left": "can1", "right": "can0"})
+            session.cfg.output_dir = root
+            session.camera = Camera()
+            state = {}
+            for side in ("left", "right"):
+                for field in ("joint_rad", "action_joint_rad", "tcp_flange", "tcp_eef"):
+                    state[f"{side}_{field}"] = np.zeros(6)
+                state[f"{side}_gripper_m"] = 0.03
+                state[f"{side}_action_gripper_m"] = 0.04
+            incomplete = dict(state)
+            incomplete.pop("right_tcp_eef")
+            session.update(incomplete)
+            with self.assertRaisesRegex(RuntimeError, "right_tcp_eef"):
+                session.make_recorder(0)
+            session.update(state)
+            recorder = session.make_recorder(0)
+            self.assertEqual(recorder.metadata["teleop_mode"], "dual")
+            self.assertEqual(recorder.metadata["arm_channels"], {"left": "can1", "right": "can0"})
+            self.assertEqual(len(recorder.metadata["joint_names"]), 12)
+
     def test_camera_loss_stops_and_marks_episode_without_restarting_on_held_a(self):
         class FailingCamera(Camera):
             failed = False

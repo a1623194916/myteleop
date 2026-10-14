@@ -93,6 +93,9 @@ class RecorderConfig:
     can: CanConfig = field(default_factory=CanConfig)
     control: ControlConfig = field(default_factory=ControlConfig)
     buttons: ButtonConfig = field(default_factory=ButtonConfig)
+    teleop_mode: str = "single"
+    arm_channels: dict[str, str] = field(default_factory=dict)
+    arm_firmware: dict[str, Any] = field(default_factory=dict)
 
     # ---------------- construction ----------------
     @classmethod

@@ -88,8 +88,12 @@ class SessionController(RecordController):
 
 
 class PiperRecordingSession:
-    def __init__(self, config_path, xr, tcp_offset_m):
+    def __init__(self, config_path, xr, tcp_offset_m, arm_channels=None):
         self.cfg = RecorderConfig.from_yaml(config_path)
+        self.arm_channels = dict(arm_channels if arm_channels is not None
+                                 else self.cfg.arm_channels or {"right": self.cfg.can.channel})
+        self.cfg.arm_channels = self.arm_channels
+        self.cfg.teleop_mode = "dual" if len(self.arm_channels) == 2 else "single"
         self.xr, self.tcp_offset_m = xr, tcp_offset_m
         self.lock = threading.Lock()
         self.state = None
@@ -121,6 +125,14 @@ class PiperRecordingSession:
         for key, value in state.items():
             if not np.all(np.isfinite(value)):
                 raise RuntimeError(f"Missing/non-finite required robot field: {key}")
+        if self.cfg.teleop_mode == "dual":
+            for side in ("left", "right"):
+                for field, shape in (("joint_rad", (6,)), ("action_joint_rad", (6,)),
+                                     ("tcp_flange", (6,)), ("tcp_eef", (6,)),
+                                     ("gripper_m", ()), ("action_gripper_m", ())):
+                    key = f"{side}_{field}"
+                    if key not in state or state[key].shape != shape:
+                        raise RuntimeError(f"Missing/invalid required dual-arm field: {key}")
         return state
 
     def make_recorder(self, episode_id):
@@ -130,13 +142,17 @@ class PiperRecordingSession:
             self.cfg.output_dir, self.cfg.task, episode_id, rate=self.cfg.fps,
             snapshot_fn=self.snapshot, extra_fn=self.controller.extra_fn,
             orbbec_client=self.camera,
-            metadata={"robot": "piper_x", "pose_frame": "robot_base",
+            metadata={"robot": "piper_x", "teleop_mode": self.cfg.teleop_mode,
+                      "arm_channels": self.arm_channels, "arm_firmware": self.cfg.arm_firmware,
+                      "pose_frame": "each arm's own robot_base (not a shared world frame)",
+                      "joint_names": ([f"{side}_joint{i}" for side in ("left", "right") for i in range(1, 7)]
+                                      if self.cfg.teleop_mode == "dual" else [f"joint{i}" for i in range(1, 7)]),
                       "pose_format": "x,y,z,roll,pitch,yaw (metres,radians; extrinsic xyz)",
                       "tcp_flange": "SDK mechanical flange pose",
                       "tcp_eef": "flange translated along local +Z",
                       "tcp_offset_m": self.tcp_offset_m,
                       "tcp_calibrated": False,
-                      "action_joint_rad": "last target actually sent to CAN",
+                      "action_joint_rad": "last target sent to CAN; dual fields use left_/right_ prefixes",
                       "state_rate_hz": self.cfg.control.rate_hz,
                       "state_sampling": "recorder holds latest hardware-loop snapshot"})
 

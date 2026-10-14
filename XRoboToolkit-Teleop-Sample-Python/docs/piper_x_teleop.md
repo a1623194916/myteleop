@@ -92,6 +92,10 @@ candump -n 5 can0
 
 ## 本机 Gemini 305 画面与一体启动
 
-在仓库根目录执行 `bash start_piper_x.sh --enable-hardware --channel can0`，启动 USB RGB 采集、A 键录制和真机遥操，默认不向 VR 推视频。右手柄 A 按一次开始 episode，再按一次结束并落盘。采集服务使用系统 Python/GStreamer，控制服务使用 `.venv`，图像编码不会占用遥操进程。`--no-camera` 用于不开相机、不录制的纯遥操；`--video` 才开启可选头显视频，地址为 `192.168.5.41:13579`。录制字段、TCP 解释、CAN 启用和测试完整步骤见 [run.md](../../run.md)。
+在仓库根目录执行 `bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-channel can1`，启动双臂、USB RGB 采集和 A 键录制，默认不向 VR 推视频。只用右臂时改为 `--mode single --controller-side right --channel can1`，只用左臂时改为 `--mode single --controller-side left --channel can0`。默认映射是左 can0、右 can1，按实物接线核对；可交换 `--left-channel` / `--right-channel`。两臂独立 GRIP 接管和 TRIGGER 夹爪，共用一个头显连接。右手柄 A 按一次开始整段 episode，再按一次结束，B / Ctrl+C 结束整个会话。
 
-**验证范围：**无头 MuJoCo 和假 CAN 驱动单测已验证，本机 305 RGB 已读取；CAN 启用和有效头显连接尚未就绪，真机方向、固件兼容性、运动极限和安全距离仍需现场确认。
+双臂每段文件同时记录 `left_joint_rad` / `right_joint_rad`、两臂的法兰/TCP、夹爪、下发目标和共享 305 图像；数据目录为 `/home/u22/kyz/datasets/piper_dual/episodes/`。单臂保留原无侧别前缀字段，目录为 `piper_reach/episodes/`。每臂 TCP 都在自己的基坐标系，没有双臂互碰检查。双臂任一反馈/手柄失效会结束整个会话。
+
+采集服务使用系统 Python/GStreamer，控制服务使用 `.venv`。`--no-camera` 用于不开相机、不录制的纯遥操；`--video` 才开启可选头显视频，地址为 `192.168.5.41:13579`。完整步骤见 [run.md](../../run.md)。
+
+**验证范围：**两路 CAN 已 UP、1 Mbit/s，已只读验证两台真实 Piper-X 六轴反馈；双臂假控制输入、共享 XR 和真实 305 的双臂 episode 落盘已验证。未发送实际双臂运动，手柄方向、物理左右映射及运动空间仍需现场确认。

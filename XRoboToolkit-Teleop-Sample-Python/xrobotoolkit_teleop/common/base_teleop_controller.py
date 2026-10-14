@@ -36,6 +36,7 @@ class BaseTeleopController(abc.ABC):
         enable_log_data: bool = False,
         log_dir: str = "logs",
         log_freq: float = 50,
+        xr_client=None,
     ):
         self.robot_urdf_path = robot_urdf_path
         self.manipulator_config = manipulator_config
@@ -44,7 +45,7 @@ class BaseTeleopController(abc.ABC):
         self.scale_factor = scale_factor
         self.q_init = q_init
         self.dt = dt
-        self.xr_client = XrClient()
+        self.xr_client = xr_client if xr_client is not None else XrClient()
 
         self.enable_log_data = enable_log_data
         self.log_dir = log_dir

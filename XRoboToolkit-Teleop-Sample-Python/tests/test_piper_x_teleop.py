@@ -105,16 +105,15 @@ class PiperXTeleopTests(unittest.TestCase):
         np.testing.assert_allclose(list(owner.gripper_pos_target["hand"].values()), grip["close_pos"])
 
     def test_actual_tcp_follows_moving_target_ball(self):
-        from scripts.simulation.teleop_fr3c_mujoco import _install_fake_xrt
-
-        _install_fake_xrt()
-        import xrobotoolkit_sdk as sdk
-
         from xrobotoolkit_teleop.simulation.mujoco_teleop_controller import MujocoTeleopController
         from xrobotoolkit_teleop.simulation.piper_x_model import HOME, TCP_LINK
 
         hand_x = [0.0]
-        sdk.get_right_controller_pose = lambda: np.array([hand_x[0], 0, 0, 0, 0, 0, 1.0])
+        xr = SimpleNamespace(
+            get_pose_by_name=lambda _: np.array([hand_x[0], 0, 0, 0, 0, 0, 1.0]),
+            get_key_value_by_name=lambda _: 1.0,
+            get_motion_tracker_data=lambda: {},
+        )
         urdf, scene = build_scene()
         controller = MujocoTeleopController(
             str(scene), str(urdf),
@@ -123,6 +122,7 @@ class PiperXTeleopTests(unittest.TestCase):
                 "control_trigger": "right_grip", "vis_target": "target",
             }},
             scale_factor=0.5,
+            xr_client=xr,
         )
         home = controller.solver.add_joints_task()
         home.set_joints(dict(zip(JOINTS, HOME)))
