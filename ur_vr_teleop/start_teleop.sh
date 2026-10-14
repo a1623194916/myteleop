@@ -22,9 +22,9 @@ fi
 CAPTURE_ARGS=()
 if ros2 service list --no-daemon --spin-time 1 | grep -qx '/data_tools_dataCapture/capture_service'; then
     CAPTURE_ARGS=(--publish-ros --capture-on-a)
-    echo "DataService detected: A button capture is enabled."
+    echo "DataService detected: both RGB cameras must pass live-frame checks before teleoperation."
 else
-    echo "DataService is not running: starting pure teleoperation without camera/data capture."
+    echo "DataService is not running: PURE TELEOP ONLY; cameras are NOT checked and recording is unavailable."
 fi
 
 exec python3 teleop_ur_vr.py \
@@ -34,5 +34,15 @@ exec python3 teleop_ur_vr.py \
     "${CAPTURE_ARGS[@]}" \
     --dataset-dir "$DATASET_DIR" \
     --instruction "$INSTRUCTION" \
-    --max-linear-speed 0.10 \
-    --max-angular-speed 0.40
+    --scale 1.40 \
+    --max-translation 0.80 \
+    --frequency 100 \
+    --oneeuro-min-cutoff 3.0 \
+    --oneeuro-beta 40.0 \
+    --oneeuro-rotation-min-cutoff 3.0 \
+    --oneeuro-rotation-beta 3.0 \
+    --oneeuro-derivative-cutoff 10.0 \
+    --position-deadband 0.001 \
+    --rotation-deadband-deg 0.2 \
+    --max-linear-speed 0.50 \
+    --max-angular-speed 1.50

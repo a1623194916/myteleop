@@ -8,18 +8,9 @@ from dataclasses import dataclass
 import numpy as np
 
 
-# Translation uses the operator's reported horizontal correction.
-# Keep orientation independent until its directions are verified.
+# XRoboToolkit's fixed PICO frame, adapted to this UR installation where
+# base +X is operator-right, +Y is operator-forward, and +Z is up.
 T_XR_TO_ROBOT = np.array(
-    [
-        [0.0, 0.0, 1.0],
-        [1.0, 0.0, 0.0],
-        [0.0, 1.0, 0.0],
-    ],
-    dtype=float,
-)
-
-R_XR_TO_ROBOT = np.array(
     [
         [1.0, 0.0, 0.0],
         [0.0, 0.0, -1.0],
@@ -27,6 +18,10 @@ R_XR_TO_ROBOT = np.array(
     ],
     dtype=float,
 )
+
+# This translation map is now a proper rotation (determinant +1), so position
+# and orientation must use the same frame conversion.
+R_XR_TO_ROBOT = T_XR_TO_ROBOT.copy()
 
 
 def _rotation_from_quaternion_xyzw(quaternion):
@@ -125,12 +120,21 @@ class _OneEuroScalar:
 class OneEuroPoseFilter:
     """Adaptive pose smoothing with SO(3) interpolation for orientation."""
 
-    def __init__(self, min_cutoff=1.5, beta=0.25, derivative_cutoff=1.0):
+    def __init__(
+        self, min_cutoff=1.5, beta=0.25, derivative_cutoff=1.0,
+        rotation_min_cutoff=None, rotation_beta=None,
+    ):
+        rotation_min_cutoff = min_cutoff if rotation_min_cutoff is None else rotation_min_cutoff
+        rotation_beta = beta if rotation_beta is None else rotation_beta
         if min_cutoff <= 0 or beta < 0 or derivative_cutoff <= 0:
             raise ValueError("One-Euro parameters are invalid")
+        if rotation_min_cutoff <= 0 or rotation_beta < 0:
+            raise ValueError("One-Euro rotation parameters are invalid")
         self.min_cutoff = float(min_cutoff)
         self.beta = float(beta)
         self.derivative_cutoff = float(derivative_cutoff)
+        self.rotation_min_cutoff = float(rotation_min_cutoff)
+        self.rotation_beta = float(rotation_beta)
         self.position_filters = [
             _OneEuroScalar(min_cutoff, beta, derivative_cutoff) for _ in range(3)
         ]
@@ -170,7 +174,7 @@ class OneEuroPoseFilter:
         self.filtered_angular_speed += derivative_alpha * (
             angular_speed - self.filtered_angular_speed
         )
-        cutoff = self.min_cutoff + self.beta * self.filtered_angular_speed
+        cutoff = self.rotation_min_cutoff + self.rotation_beta * self.filtered_angular_speed
         alpha = _smoothing_alpha(cutoff, dt)
         filtered_delta = _rotvec_from_rotation(target_rotation @ self.filtered_rotation.T)
         self.filtered_rotation = (
@@ -229,12 +233,14 @@ class RelativePoseMapper:
         self._anchor_controller_rotation = None
         self._anchor_tcp_position = None
         self._anchor_tcp_rotation = None
+        self._translation_from_xr = T_XR_TO_ROBOT.copy()
+        self._rotation_from_xr = R_XR_TO_ROBOT.copy()
 
     @property
     def engaged(self):
         return self._anchor_tcp_position is not None
 
-    def engage(self, robot_tcp, controller_pose):
+    def engage(self, robot_tcp, controller_pose, headset_pose=None, translation_matrix=None):
         tcp = np.asarray(robot_tcp, dtype=float)
         pose = np.asarray(controller_pose, dtype=float)
         if (
@@ -248,6 +254,19 @@ class RelativePoseMapper:
         self._anchor_tcp_rotation = _rotation_from_rotvec(tcp[3:])
         self._anchor_controller_position = pose[:3].copy()
         self._anchor_controller_rotation = _rotation_from_quaternion_xyzw(pose[3:])
+        if translation_matrix is not None:
+            transform = np.asarray(translation_matrix, dtype=float)
+            if transform.shape != (3, 3) or not np.all(np.isfinite(transform)):
+                raise ValueError("translation matrix must contain 3x3 finite values")
+            self._translation_from_xr = transform.copy()
+            self._rotation_from_xr = R_XR_TO_ROBOT.copy()
+        else:
+            self._translation_from_xr = T_XR_TO_ROBOT.copy()
+            self._rotation_from_xr = R_XR_TO_ROBOT.copy()
+
+    @property
+    def translation_from_xr(self):
+        return self._translation_from_xr.copy()
 
     def release(self):
         self._anchor_tcp_position = None
@@ -262,18 +281,67 @@ class RelativePoseMapper:
         if pose.shape != (7,) or not np.all(np.isfinite(pose)):
             raise ValueError("controller pose must contain 7 finite values")
 
-        delta_position = T_XR_TO_ROBOT @ (pose[:3] - self._anchor_controller_position)
+        delta_position = self._translation_from_xr @ (
+            pose[:3] - self._anchor_controller_position
+        )
         delta_position = _limit_norm(delta_position * self.scale, self.max_translation)
 
         current_rotation = _rotation_from_quaternion_xyzw(pose[3:])
         delta_xr = current_rotation @ self._anchor_controller_rotation.T
-        delta_robot = R_XR_TO_ROBOT @ delta_xr @ R_XR_TO_ROBOT.T
+        delta_robot = self._rotation_from_xr @ delta_xr @ self._rotation_from_xr.T
         delta_rotvec = _limit_norm(_rotvec_from_rotation(delta_robot), self.max_rotation)
         target_rotation = _rotation_from_rotvec(delta_rotvec) @ self._anchor_tcp_rotation
 
         return np.concatenate(
             [self._anchor_tcp_position + delta_position, _rotvec_from_rotation(target_rotation)]
         )
+
+
+@dataclass
+class CartesianDeadband:
+    """Suppress small Cartesian pose changes without adding time-based lag."""
+
+    position_threshold: float = 0.002
+    rotation_threshold: float = math.radians(0.5)
+    output: np.ndarray | None = None
+
+    def __post_init__(self):
+        if self.position_threshold < 0 or self.rotation_threshold < 0:
+            raise ValueError("deadband thresholds must be non-negative")
+
+    def reset(self, pose):
+        value = np.asarray(pose, dtype=float)
+        if value.shape != (6,) or not np.all(np.isfinite(value)):
+            raise ValueError("pose must contain 6 finite values")
+        self.output = value.copy()
+
+    def advance(self, target):
+        value = np.asarray(target, dtype=float)
+        if value.shape != (6,) or not np.all(np.isfinite(value)):
+            raise ValueError("target must contain 6 finite values")
+        if self.output is None:
+            self.reset(value)
+            return value.copy()
+
+        position_delta = value[:3] - self.output[:3]
+        position_distance = float(np.linalg.norm(position_delta))
+        if position_distance > self.position_threshold:
+            self.output[:3] += position_delta * (
+                1.0 - self.position_threshold / position_distance
+            )
+
+        output_rotation = _rotation_from_rotvec(self.output[3:])
+        target_rotation = _rotation_from_rotvec(value[3:])
+        rotation_delta = _rotvec_from_rotation(target_rotation @ output_rotation.T)
+        rotation_angle = float(np.linalg.norm(rotation_delta))
+        if rotation_angle > self.rotation_threshold:
+            applied_delta = rotation_delta * (
+                1.0 - self.rotation_threshold / rotation_angle
+            )
+            output_rotation = _rotation_from_rotvec(applied_delta) @ output_rotation
+            self.output[3:] = _rotvec_from_rotation(output_rotation)
+
+        return self.output.copy()
 
 
 @dataclass

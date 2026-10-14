@@ -1,6 +1,12 @@
 __pycache__/
 *.py[cod]
+
+# Runtime output and local diagnostics
 logs/
 Log/
-backup-*/
+
+# Bundled third-party runtime binaries are installed locally, not maintained here
 vendor/
+
+# Local snapshots created while tuning coordinate mappings
+backup-*/
