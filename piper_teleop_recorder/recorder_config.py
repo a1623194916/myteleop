@@ -52,17 +52,23 @@ class CanConfig:
 
     channel: str = "can0"
     firmware: Any = None  # None -> auto-probe firmware profile
-    speed_percent: int = 10
+    speed_percent: int = 30
     gripper_max_width: float = 0.07
+    gripper_force: float = 5.0
 
 
 @dataclass
 class ControlConfig:
     """Teleop control-thread tunables (MuJoCo IK + JointFollower)."""
 
-    rate_hz: float = 20.0
-    max_joint_step_deg: float = 0.35
-    scale_factor: float = 0.5
+    rate_hz: float = 50.0
+    max_joint_step_deg: float = 0.6
+    scale_factor: float = 1.0
+    no_pose_filter: bool = False
+    position_deadband: float = 0.002
+    rotation_deadband_deg: float = 0.5
+    max_linear_speed: float = 0.25
+    max_angular_speed: float = 1.5
     deadman_threshold: float = 0.9  # right_grip value above this engages teleop
     poll_rate_hz: float = 20.0  # button edge-detection poll rate
 

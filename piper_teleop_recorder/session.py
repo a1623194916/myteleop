@@ -88,7 +88,8 @@ class SessionController(RecordController):
 
 
 class PiperRecordingSession:
-    def __init__(self, config_path, xr, tcp_offset_m, arm_channels=None):
+    def __init__(self, config_path, xr, tcp_offset_m, arm_channels=None, motion_settings=None):
+        self.motion_settings = dict(motion_settings or {})
         self.cfg = RecorderConfig.from_yaml(config_path)
         self.arm_channels = dict(arm_channels if arm_channels is not None
                                  else self.cfg.arm_channels or {"right": self.cfg.can.channel})
@@ -152,6 +153,7 @@ class PiperRecordingSession:
                       "tcp_eef": "flange translated along local +Z",
                       "tcp_offset_m": self.tcp_offset_m,
                       "tcp_calibrated": False,
+                      "motion_settings": self.motion_settings,
                       "action_joint_rad": "last target sent to CAN; dual fields use left_/right_ prefixes",
                       "state_rate_hz": self.cfg.control.rate_hz,
                       "state_sampling": "recorder holds latest hardware-loop snapshot"})

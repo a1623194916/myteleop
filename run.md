@@ -23,6 +23,15 @@ cd /opt/apps/roboticsservice
 bash runService.sh
 ```
 
+也可使用本仓库启动脚本，自动复用已经监听 `60061` 的服务，避免跨用户重复启动；带 Unity 连接界面时执行：
+
+```bash
+cd /home/u22/kyz/idea/pico_software
+bash start_pico_vr.sh --unity
+```
+
+启动顺序与 UR 相同：PC Service → Unity 完成 SDK 初始化 → 遥操最后订阅。当前 PC Service 只支持一个反馈订阅者，遥操订阅后 Unity 的位姿显示可能停止更新；Unity 可用于连接界面，但不能保证与遥操同时显示实时位姿。遥操运行期间不要重启 Unity 或另开 SDK 检查程序。
+
 ### 检查 PICO 数据链路
 
 头显连接后，在另一终端使用遥操虚拟环境检查 XRT 链路：
@@ -129,10 +138,12 @@ cd /home/u22/kyz/idea/pico_software
 export DISPLAY="${DISPLAY:-:1}"
 bash start_piper_x.sh --mode dual --enable-hardware \
   --left-channel can0 --right-channel can1 \
-  --rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5
+  --rate-hz 50 --speed-percent 30 --max-joint-step-deg 0.6 --scale-factor 1.0
 ```
 
 启动脚本默认双臂，建议仍显式写 `--mode dual`。左手柄控制 `can0`，右手柄控制 `can1`；如接线相反，交换两个 channel 参数。
+
+需要一体启动 Unity 时给同一命令添加 `--unity`；脚本先启动/复用服务和 Unity，再启动相机与遥操。首次验证也可保留低速参数 `--rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5`。
 
 <a id="piper-single-record"></a>
 
@@ -172,7 +183,11 @@ bash start_piper_x.sh --mode single --controller-side left --channel can0 --enab
 
 上表为双臂字段；单臂保留无侧别前缀的 `joint_rad`、`action_joint_rad`、`tcp_flange`、`tcp_eef`、`gripper_m`、`action_gripper_m` 和 `teleop_active`，手柄字段使用所选侧的 `left_*` 或 `right_*`。两臂 TCP 分属各自基坐标系，没有变换到共同世界坐标系，也没有两臂互碰检查，需隔离运动空间。
 
-`tcp_eef` 的 105 mm 是模型定义，**尚未实物标定**，该状态写入录制元数据。HDF5 同时保留法兰和夹爪中心，避免混淆。默认 30 Hz 落盘，机器人状态来自 20 Hz 控制循环的最新快照，不能将它视为 30 Hz 独立机器人反馈；图像时间戳可辨别重复采样。
+`tcp_eef` 的 105 mm 是模型定义，**尚未实物标定**，该状态写入录制元数据。HDF5 同时保留法兰和夹爪中心，避免混淆。默认 30 Hz 落盘，机器人状态来自默认 50 Hz 控制循环的最新快照，机器人和图像没有硬件同步；图像时间戳可辨别重复采样。
+
+默认手柄平移比例 1:1，50 Hz × 每周期 0.6° 的关节目标上限为 30°/秒，厂商速度参数为 30%；实际速度仍受 IK、反馈和驱动限制。IK 时间步长与控制频率一致。复用 UR 的 One-Euro 位姿滤波、2 mm / 0.5° 死区、0.25 m/s / 1.5 rad/s 笛卡尔目标限速和手柄位置跳变保护，但保留 Piper 自己的坐标映射。每次重新握持 GRIP 都重置滤波与参考点。可用 `--no-pose-filter` 关闭滤波，`--position-deadband`、`--rotation-deadband-deg`、`--max-linear-speed`、`--max-angular-speed` 调整对应参数。
+
+TRIGGER 独立于 GRIP：松开为张开，按下为闭合，中间值对应连续开度；只要手柄数据有效，不接管机械臂也能操作夹爪。默认夹持力 5 N，可用 `--gripper-force` 调整（支持 0 < 力 ≤ 10 N），最大开口仍为 `--gripper-max-width 0.07`。夹爪限频 10 Hz，至少每 0.5 秒重发目标；SDK 的宽度命令本身携带使能位。终端每 2 秒显示各臂 TRIGGER、夹爪目标/实际开度、使能和状态码；反馈缺失会明确报警。若 TRIGGER 数值变化但实际开度不变，应根据反馈检查夹爪接线、供电、状态及实际行程，而非只增大机械臂速度。
 
 录制开始前检查相机和机器人状态；相机超过 1 秒无新帧、机器人快照超过 300 ms 或字段缺失时，拒绝开始或结束当前 episode 并保留错误信息。相机故障停止录制，机械臂遥操仍继续；恢复后需重新按 A 开始。B / Ctrl+C 退出会结束正在录制的 episode。
 
@@ -195,7 +210,7 @@ cd /home/u22/kyz/idea/pico_software
 export DISPLAY="${DISPLAY:-:1}"
 bash start_piper_x.sh --mode dual --no-camera --enable-hardware \
   --left-channel can0 --right-channel can1 \
-  --rate-hz 20 --speed-percent 10 --max-joint-step-deg 0.35 --scale-factor 0.5
+  --rate-hz 50 --speed-percent 30 --max-joint-step-deg 0.6 --scale-factor 1.0
 ```
 
 ##### 单臂右臂纯遥操

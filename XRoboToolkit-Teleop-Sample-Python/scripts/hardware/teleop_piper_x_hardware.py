@@ -70,17 +70,23 @@ def wait_for_pico(xr, sides, timeout=0.0):
 class TeleopArm:
     """One arm's IK, clutch and gripper state; XR is shared across both arms."""
 
-    def __init__(self, side, channel, xr, urdf, scene, scale_factor, max_joint_step_deg):
-        from xrobotoolkit_teleop.simulation.mujoco_teleop_controller import MujocoTeleopController
+    def __init__(self, side, channel, xr, urdf, scene, scale_factor, max_joint_step_deg,
+                 rate_hz=50.0, gripper_force=5.0, no_pose_filter=False,
+                 position_deadband=0.002, rotation_deadband_deg=0.5,
+                 max_linear_speed=0.25, max_angular_speed=1.5):
+        from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
-        self.controller = MujocoTeleopController(
+        self.controller = PiperTeleopController(
             xml_path=str(scene), robot_urdf_path=str(urdf),
             manipulator_config={f"{side}_hand": {
                 "link_name": TCP_LINK, "pose_source": f"{side}_controller",
                 "control_trigger": f"{side}_grip", "vis_target": "target",
             }},
-            scale_factor=scale_factor, xr_client=xr,
+            scale_factor=scale_factor, xr_client=xr, dt=1.0 / rate_hz,
+            pose_filter=not no_pose_filter, position_deadband=position_deadband,
+            rotation_deadband_deg=rotation_deadband_deg,
+            max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
         )
         self.model = self.controller.mj_model
         self.joint_ids = [self.model.joint(name).id for name in JOINTS]
@@ -91,6 +97,7 @@ class TeleopArm:
         self.last_gripper = None
         self.last_gripper_time = 0.0
         self.gripper_command_m = np.nan
+        self.gripper_force = gripper_force
 
     def solve(self, measured):
         for index, joint_id in enumerate(self.joint_ids):
@@ -103,13 +110,15 @@ class TeleopArm:
         return self.follower.next(measured, target, active), active
 
     def send(self, command, tick):
-        if command is None:
-            return
-        self.arm.move_joints(command)
-        self.last_command = command.copy()
+        if command is not None:
+            self.arm.move_joints(command)
+            self.last_command = command.copy()
         opening = 1.0 - float(np.clip(self.xr.get_key_value_by_name(f"{self.side}_trigger"), 0, 1))
-        if (self.last_gripper is None or abs(opening - self.last_gripper) > 0.03) and tick - self.last_gripper_time >= 0.1:
-            self.arm.set_gripper(opening)
+        # Like UR, trigger is independent of the arm clutch. Periodic refresh also
+        # recovers a lost CAN target, rather than sending each width only once.
+        due = tick - self.last_gripper_time
+        if due >= 0.1 and (self.last_gripper is None or abs(opening - self.last_gripper) > 0.03 or due >= 0.5):
+            self.arm.set_gripper(opening, force=self.gripper_force)
             self.gripper_command_m = opening * self.arm.gripper_max_width
             self.last_gripper, self.last_gripper_time = opening, tick
 
@@ -136,16 +145,34 @@ class TeleopArm:
         }
         return state
 
+    def report_gripper(self):
+        status = self.arm.gripper.get_gripper_status()
+        target = self.gripper_command_m * 1000
+        if status is None or time.time() - status.timestamp > 0.3:
+            print(f"[{self.side}] gripper target={target:.1f} mm; WARNING: no fresh gripper feedback", flush=True)
+            return
+        msg = status.msg
+        actual = f"{msg.value * 1000:.1f} mm" if msg.mode == "width" else f"{msg.value:.1f} deg"
+        print(f"[{self.side}] trigger={self.xr.get_key_value_by_name(self.side + '_trigger'):.2f}; "
+              f"gripper target={target:.1f} mm, actual={actual}, "
+              f"enabled={msg.foc_status.driver_enable_status}, status=0x{msg.status_code:02x}", flush=True)
+
 
 def main(
     channel: str | None = None,
     enable_hardware: bool = False,
     firmware: str | None = None,
-    rate_hz: float = 20.0,
-    max_joint_step_deg: float = 0.35,
-    scale_factor: float = 0.5,
-    speed_percent: int = 10,
+    rate_hz: float = 50.0,
+    max_joint_step_deg: float = 0.6,
+    scale_factor: float = 1.0,
+    speed_percent: int = 30,
     gripper_max_width: float = 0.07,
+    gripper_force: float = 5.0,
+    no_pose_filter: bool = False,
+    position_deadband: float = 0.002,
+    rotation_deadband_deg: float = 0.5,
+    max_linear_speed: float = 0.25,
+    max_angular_speed: float = 1.5,
     read_only: bool = False,
     record_config: str | None = None,
     mode: Literal["single", "dual"] = "single",
@@ -182,6 +209,10 @@ def main(
         raise ValueError("Use 0 < rate_hz <= 50 and 0 < max_joint_step_deg <= 1")
     if not 0 < scale_factor <= 1 or not 1 <= speed_percent <= 100 or not 0 < gripper_max_width <= 0.1:
         raise ValueError("Invalid motion scale, speed percentage or gripper width")
+    if not 0 < gripper_force <= 10 or position_deadband < 0 or rotation_deadband_deg < 0:
+        raise ValueError("Invalid gripper force (0..10 N) or pose deadband")
+    if max_linear_speed <= 0 or max_angular_speed <= 0:
+        raise ValueError("Cartesian speed limits must be positive")
 
     from xrobotoolkit_teleop.common.xr_client import XrClient
 
@@ -191,20 +222,38 @@ def main(
     recording = None
     try:
         for side, can_channel in selected.items():
-            runtimes[side] = TeleopArm(side, can_channel, xr, urdf, scene, scale_factor, max_joint_step_deg)
+            runtimes[side] = TeleopArm(
+                side, can_channel, xr, urdf, scene, scale_factor, max_joint_step_deg,
+                rate_hz=rate_hz, gripper_force=gripper_force, no_pose_filter=no_pose_filter,
+                position_deadband=position_deadband, rotation_deadband_deg=rotation_deadband_deg,
+                max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
+            )
         if record_config:
             sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
             from piper_teleop_recorder.session import PiperRecordingSession
 
             recording = PiperRecordingSession(record_config, xr, TCP_OFFSET_M,
-                                              arm_channels=selected)
+                                              arm_channels=selected, motion_settings={
+                                                  "gripper_force_n": gripper_force,
+                                                  "pose_filter": not no_pose_filter,
+                                                  "position_deadband_m": position_deadband,
+                                                  "rotation_deadband_deg": rotation_deadband_deg,
+                                                  "max_linear_speed_m_s": max_linear_speed,
+                                                  "max_angular_speed_rad_s": max_angular_speed,
+                                              })
             recording.cfg.control.rate_hz = rate_hz
             recording.cfg.control.max_joint_step_deg = max_joint_step_deg
             recording.cfg.control.scale_factor = scale_factor
+            recording.cfg.control.no_pose_filter = no_pose_filter
+            recording.cfg.control.position_deadband = position_deadband
+            recording.cfg.control.rotation_deadband_deg = rotation_deadband_deg
+            recording.cfg.control.max_linear_speed = max_linear_speed
+            recording.cfg.control.max_angular_speed = max_angular_speed
             recording.cfg.can.channel = next(iter(selected.values()))
             recording.cfg.can.firmware = firmware
             recording.cfg.can.speed_percent = speed_percent
             recording.cfg.can.gripper_max_width = gripper_max_width
+            recording.cfg.can.gripper_force = gripper_force
             recording.cfg.arm_firmware = profiles
             recording.prepare()
 
@@ -225,7 +274,11 @@ def main(
 
         timestamp, packet_time = xr.get_timestamp_ns(), time.monotonic()
         print("Piper-X enabled. Each hand's GRIP engages its arm; TRIGGER controls its gripper; B stops all.")
+        print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint cap={rate_hz * max_joint_step_deg:g} deg/s, "
+              f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
+              f"Cartesian cap={max_linear_speed:g} m/s; gripper={gripper_force:g} N (independent of GRIP).")
         period = 1.0 / rate_hz
+        next_gripper_report = time.monotonic() + 2.0
         while True:
             tick = time.monotonic()
             current_timestamp = xr.get_timestamp_ns()
@@ -243,6 +296,10 @@ def main(
             solutions = {side: runtime.solve(measured[side]) for side, runtime in runtimes.items()}
             for side, runtime in runtimes.items():
                 runtime.send(solutions[side][0], tick)
+            if tick >= next_gripper_report:
+                for runtime in runtimes.values():
+                    runtime.report_gripper()
+                next_gripper_report = tick + 2.0
             if recording:
                 state = {}
                 for side, runtime in runtimes.items():

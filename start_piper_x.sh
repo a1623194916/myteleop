@@ -6,6 +6,7 @@ cd "$project_dir"
 video_pid=""
 record_enabled=true
 video_enabled=false
+unity_enabled=false
 robot_args=()
 teleop_mode=dual
 while (( $# )); do
@@ -16,6 +17,7 @@ while (( $# )); do
     --mode=*) teleop_mode="${1#--mode=}" ;;
     --single) teleop_mode=single ;;
     --dual) teleop_mode=dual ;;
+    --unity) unity_enabled=true ;;
     --help|-h)
       echo 'Usage: bash start_piper_x.sh --mode single|dual [--controller-side left|right] [robot options]'
       echo 'Default: dual; left=can0, right=can1; A-key recording; NO headset video.'
@@ -23,6 +25,7 @@ while (( $# )); do
       echo '--no-camera disables capture/recording; --video enables optional headset video.'
       echo '--read-only checks feedback without motor enable; --enable-hardware enables real teleoperation.'
       echo 'Waits indefinitely for PICO before enabling motors; --pico-wait-timeout SECONDS sets a limit.'
+      echo '--unity starts/reuses PC Service and Unity first; the teleop SDK subscribes last.'
       exit 0 ;;
     --record) record_enabled=true ;;
     --no-record) record_enabled=false ;;
@@ -46,6 +49,9 @@ cleanup() {
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
+if [[ "$unity_enabled" == true ]]; then
+  bash "$project_dir/start_pico_vr.sh" --unity
+fi
 if [[ "$record_enabled" == true || "$video_enabled" == true ]]; then
   camera_args=()
   ready_port=8765
