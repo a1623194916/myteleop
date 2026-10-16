@@ -5,7 +5,9 @@ from pathlib import Path
 
 import numpy as np
 
-from xrobotoolkit_teleop.hardware.piper_x_home import JointHomeReturn, load_home_targets
+from xrobotoolkit_teleop.hardware.piper_x_home import (
+    JointHomeReturn, bounded_home_target, load_home_targets,
+)
 
 
 def home(side="right", target=None):
@@ -74,6 +76,26 @@ class HomeTests(unittest.TestCase):
         self.assertEqual(targets["left"].shape, (6,))
         with self.assertRaisesRegex(ValueError, "belongs to"):
             load_home_targets(path, {"left": "can1"})
+
+    def test_bounded_target_matches_what_the_home_button_reaches(self):
+        # Limits read straight off the MuJoCo scene, in degrees: J1 +-150,
+        # J2 [0, 180], J3 [-170, 0], J4/J5 +-89, J6 +-120. Both saved poses sit
+        # outside J2/J3, so the bounded target is exactly the pose the teleop
+        # startup log prints, and the standalone home tool reuses this function.
+        lower = np.deg2rad([-150, 0, -170, -89, -89, -120])
+        upper = np.deg2rad([150, 180, 0, 89, 89, 120])
+        path = Path(__file__).resolve().parents[2] / "configs/piper_x_home.json"
+        targets = load_home_targets(path, {"left": "can0", "right": "can1"})
+
+        target, correction, margin = bounded_home_target("right", targets["right"], lower, upper)
+        np.testing.assert_allclose(np.rad2deg(target).round(3),
+                                   [-2.402, 0.0, 0.0, 36.154, 8.421, 6.469])
+        self.assertGreater(correction, 0)
+        self.assertGreaterEqual(margin, correction)
+
+        left_target, _, _ = bounded_home_target("left", targets["left"], lower, upper)
+        np.testing.assert_allclose(np.rad2deg(left_target).round(3),
+                                   [0.0, 0.0, 0.0, 35.946, 1.225, 5.492])
 
 
 if __name__ == "__main__":

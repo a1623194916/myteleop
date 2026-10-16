@@ -24,20 +24,35 @@ def load_home_targets(path, channels):
     return targets
 
 
+def bounded_home_target(side, raw_target, lower, upper, max_correction_rad=np.deg2rad(5.0)):
+    """Clip a saved pose into the model limits.
+
+    Returns ``(target, correction, feedback_margin)``. A saved pose is captured
+    from a real arm, so it can sit a little outside the nominal limits; that
+    offset is allowed back as feedback margin while the commanded position stays
+    strictly inside the limits. Shared by the teleop home button and the
+    standalone home tool so both move to exactly the same pose.
+    """
+    raw = np.asarray(raw_target, dtype=float)
+    if raw.shape != (6,) or not np.all(np.isfinite(raw)):
+        raise ValueError("Home target must contain six finite angles")
+    target = np.clip(raw, lower, upper)
+    correction = float(np.max(np.abs(target - raw)))
+    if correction > max_correction_rad:
+        raise ValueError(f"{side} saved home exceeds model limits by more than "
+                         f"{np.rad2deg(max_correction_rad):.0f} degrees")
+    # Permit the measured boundary offset captured on this particular arm.
+    margin = max(0.05, correction + np.deg2rad(0.1))
+    return target, correction, margin
+
+
 class JointHomeReturn:
     def __init__(self, side, raw_target, lower, upper, max_step_rad,
                  timeout=30.0, tolerance_rad=np.deg2rad(0.5)):
         self.side = side
         self.raw_target = np.asarray(raw_target, dtype=float)
-        if self.raw_target.shape != (6,) or not np.all(np.isfinite(self.raw_target)):
-            raise ValueError("Home target must contain six finite angles")
-        self.target = np.clip(self.raw_target, lower, upper)
-        correction = np.max(np.abs(self.target - self.raw_target))
-        if correction > np.deg2rad(5):
-            raise ValueError(f"{side} saved home exceeds model limits by more than 5 degrees")
-        # Permit the measured boundary offset captured on this particular arm;
-        # commanded positions still stay strictly inside nominal joint limits.
-        self.feedback_margin = max(0.05, correction + np.deg2rad(0.1))
+        self.target, correction, self.feedback_margin = bounded_home_target(
+            side, self.raw_target, lower, upper)
         self.follower = JointFollower(lower, upper, max_step_rad,
                                       feedback_limit_margin_rad=self.feedback_margin)
         self.timeout, self.tolerance = timeout, tolerance_rad
