@@ -28,6 +28,7 @@ while (( $# )); do
       echo '--servo-slew-deg N caps the per-cycle joint step; --no-unlimited-motion restores software speed caps; --speed-percent sets driver speed.'
       echo '--tracking-error-deg / --tracking-timeout-s set the tracking guard thresholds; --strict-rearm stops instead of auto-resuming.'
       echo '--skip-gripper-check skips the startup stroke probe; --allow-gripper-fault keeps the arm usable if the effector fails.'
+      echo '--gripper-slew-mm-s N ramps the stroke (default 250 mm/s => 0.4 s full stroke; the effector itself does ~385 mm/s).'
       echo 'Gripper tool: PYTHONPATH=. .venv/bin/python scripts/hardware/piper_x_gripper_tool.py read|sweep|release|watch|raw|angle|mode|calibrate'
       echo 'PICO Send off pauses commands and waits for reconnection; release GRIP to rearm.'
       echo 'Use --left-channel/--right-channel to change the mapping, or --channel in single mode.'

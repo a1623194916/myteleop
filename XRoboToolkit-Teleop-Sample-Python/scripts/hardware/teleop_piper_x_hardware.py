@@ -106,7 +106,7 @@ class TeleopArm:
                  oneeuro_derivative_cutoff=10.0, oneeuro_rotation_min_cutoff=3.0,
                  oneeuro_rotation_beta=3.0, servo_slew_deg=None,
                  tracking_error_deg=20.0, tracking_timeout=0.8,
-                 gripper_slew_mm_s=150.0):
+                 gripper_slew_mm_s=250.0):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -329,7 +329,7 @@ def main(
     strict_rearm: bool = False,
     skip_gripper_check: bool = False,
     allow_gripper_fault: bool = False,
-    gripper_slew_mm_s: float = 150.0,
+    gripper_slew_mm_s: float = 250.0,
 ) -> None:
     """Independent GRIP/TRIGGER; A records; B returns right, Y returns left; Ctrl+C exits."""
     selected = select_arms(mode, controller_side, channel, left_channel, right_channel)
@@ -525,7 +525,8 @@ def main(
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
               f"Cartesian cap={cartesian_cap}; mode={motion_mode}; "
               f"gripper={gripper_force:g} N, stroke ramp={gripper_slew_mm_s:g} mm/s "
-              f"(release TRIGGER once to arm closing).")
+              f"(full stroke {gripper_max_width * 1000 / gripper_slew_mm_s:.2f} s); "
+              f"release TRIGGER once to arm closing.")
         print(f"One-Euro: position cutoff={oneeuro_min_cutoff:g}, beta={oneeuro_beta:g}; "
               f"rotation cutoff={oneeuro_rotation_min_cutoff:g}, beta={oneeuro_rotation_beta:g}; "
               f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace={tracking_timeout:g} s.")
