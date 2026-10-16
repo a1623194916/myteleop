@@ -40,7 +40,7 @@ def validate_controller(xr, side):
             raise RuntimeError(f"{side} controller {key} is non-finite")
 
 
-def wait_for_pico(xr, sides, timeout=0.0, motors_enabled=False):
+def wait_for_pico(xr, sides, timeout=0.0, motors_enabled=False, check_feedback=None):
     """Wait for a new packet with all selected hands valid, before opening CAN."""
     started = time.monotonic()
     timestamp = xr.get_timestamp_ns()
@@ -51,6 +51,8 @@ def wait_for_pico(xr, sides, timeout=0.0, motors_enabled=False):
           f"{motor_note} Ctrl+C cancels.", flush=True)
     while True:
         now = time.monotonic()
+        if check_feedback is not None:
+            check_feedback()
         current = xr.get_timestamp_ns()
         if current > 0 and current != timestamp:
             timestamp = current
@@ -70,6 +72,25 @@ def wait_for_pico(xr, sides, timeout=0.0, motors_enabled=False):
         time.sleep(0.02)
 
 
+def pause_for_pico(xr, runtimes, homes, recording=None):
+    """No motion sends while Send is off; require fresh anchors on resume."""
+    print("PICO Send/tracking paused: holding commands; waiting for live data. Ctrl+C exits.", flush=True)
+    for side, runtime in runtimes.items():
+        runtime.release_clutch()
+        runtime.rearm_required = True
+        homes[side].returning = False
+        homes[side].blocked_until_release = True
+        homes[side].last_pressed = True
+        homes[side].follower.last_command = None
+    if recording is not None:
+        recording.pause()
+    def check_feedback():
+        for runtime in runtimes.values():
+            runtime.arm.read_joints()
+    wait_for_pico(xr, runtimes, motors_enabled=True, check_feedback=check_feedback)
+    print("PICO resumed: release GRIP and TRIGGER, then GRIP to take over again.", flush=True)
+
+
 class TeleopArm:
     """One arm's IK, clutch and gripper state; XR is shared across both arms."""
 
@@ -77,7 +98,7 @@ class TeleopArm:
                  rate_hz=50.0, gripper_force=5.0, no_pose_filter=False,
                  position_deadband=0.001, rotation_deadband_deg=0.3,
                  max_linear_speed=0.5, max_angular_speed=1.5,
-                 oneeuro_min_cutoff=8.0, oneeuro_beta=2.0):
+                 oneeuro_min_cutoff=8.0, oneeuro_beta=2.0, unlimited_motion=False):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -92,11 +113,14 @@ class TeleopArm:
             rotation_deadband_deg=rotation_deadband_deg,
             max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
             oneeuro_min_cutoff=oneeuro_min_cutoff, oneeuro_beta=oneeuro_beta,
+            unlimited_motion=unlimited_motion,
         )
         self.model = self.controller.mj_model
         self.joint_ids = [self.model.joint(name).id for name in JOINTS]
         limits = self.model.jnt_range[self.joint_ids]
-        self.follower = JointFollower(limits[:, 0], limits[:, 1], np.deg2rad(max_joint_step_deg))
+        self.follower = JointFollower(limits[:, 0], limits[:, 1],
+                                      np.inf if unlimited_motion else np.deg2rad(max_joint_step_deg))
+        self.rearm_required = False
         self.arm = None
         self.last_command = None
         self.last_gripper = None
@@ -207,7 +231,7 @@ def main(
     rate_hz: float = 50.0,
     max_joint_step_deg: float = 1.2,
     scale_factor: float = 1.0,
-    speed_percent: int = 30,
+    speed_percent: int = 100,
     gripper_max_width: float = 0.10,
     gripper_force: float = 5.0,
     motion_mode: Literal["j", "js"] = "js",
@@ -230,6 +254,7 @@ def main(
     home_config: str = str(Path(__file__).resolve().parents[3] / "configs/piper_x_home.json"),
     home_speed_deg_s: float = 15.0,
     home_timeout: float = 30.0,
+    unlimited_motion: bool = True,
 ) -> None:
     """Independent GRIP/TRIGGER; A records; B returns right, Y returns left; Ctrl+C exits."""
     selected = select_arms(mode, controller_side, channel, left_channel, right_channel)
@@ -281,6 +306,7 @@ def main(
                 position_deadband=position_deadband, rotation_deadband_deg=rotation_deadband_deg,
                 max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
                 oneeuro_min_cutoff=oneeuro_min_cutoff, oneeuro_beta=oneeuro_beta,
+                unlimited_motion=unlimited_motion,
             )
         homes = {}
         for side, runtime in runtimes.items():
@@ -303,6 +329,7 @@ def main(
                                                   "max_linear_speed_m_s": max_linear_speed,
                                                   "max_angular_speed_rad_s": max_angular_speed,
                                                   "motion_mode": motion_mode,
+                                                  "unlimited_motion": unlimited_motion,
                                                   "oneeuro_min_cutoff": oneeuro_min_cutoff,
                                                   "oneeuro_beta": oneeuro_beta,
                                                   "home_config": str(Path(home_config).resolve()),
@@ -355,9 +382,11 @@ def main(
 
         timestamp, packet_time = xr.get_timestamp_ns(), time.monotonic()
         print("Piper-X enabled: GRIP takes over, TRIGGER controls gripper; B returns right, Y returns left; Ctrl+C exits.")
-        print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint cap={rate_hz * max_joint_step_deg:g} deg/s, "
+        joint_cap = 'off' if unlimited_motion else f'{rate_hz * max_joint_step_deg:g} deg/s'
+        cartesian_cap = 'off' if unlimited_motion else f'{max_linear_speed:g} m/s'
+        print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint cap={joint_cap}, "
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
-              f"Cartesian cap={max_linear_speed:g} m/s; mode={motion_mode}; "
+              f"Cartesian cap={cartesian_cap}; mode={motion_mode}; "
               f"gripper={gripper_force:g} N (release TRIGGER once to arm closing).")
         period = 1.0 / rate_hz
         next_gripper_report = time.monotonic() + 2.0
@@ -370,13 +399,31 @@ def main(
             if current_timestamp != timestamp and current_timestamp > 0:
                 timestamp, packet_time = current_timestamp, tick
             if tick - packet_time > 0.5:
-                raise RuntimeError("PICO packets stopped updating (> 500 ms); stopping all arms")
+                pause_for_pico(xr, runtimes, homes, recording)
+                timestamp, packet_time = xr.get_timestamp_ns(), time.monotonic()
+                report_started, report_cycles = packet_time, 0
+                next_gripper_report, max_packet_gap = packet_time + 2.0, 0.0
+                continue
             # Verify every selected arm/hand before sending either arm's target.
-            for side in selected:
-                validate_controller(xr, side)
+            try:
+                for side in selected:
+                    validate_controller(xr, side)
+            except RuntimeError:
+                pause_for_pico(xr, runtimes, homes, recording)
+                timestamp, packet_time = xr.get_timestamp_ns(), time.monotonic()
+                report_started, report_cycles = packet_time, 0
+                next_gripper_report, max_packet_gap = packet_time + 2.0, 0.0
+                continue
             measured = {side: runtime.arm.read_joints() for side, runtime in runtimes.items()}
             solutions, home_handled = {}, {}
             for side, runtime in runtimes.items():
+                if getattr(runtime, "rearm_required", False):
+                    if (xr.get_key_value_by_name(f"{side}_grip") > 0.9
+                            or xr.get_key_value_by_name(f"{side}_trigger") > 0.05):
+                        home_handled[side] = True
+                        solutions[side] = (None, False)
+                        continue
+                    runtime.rearm_required = False
                 command, handled = homes[side].step(
                     measured[side], xr.get_button_state_by_name("B" if side == "right" else "Y"),
                     xr.get_key_value_by_name(f"{side}_grip") > 0.9, tick,

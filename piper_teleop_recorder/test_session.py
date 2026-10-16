@@ -34,6 +34,17 @@ class Camera:
 
 
 class RecordingTest(unittest.TestCase):
+    def test_pico_pause_invalidates_snapshot_and_stops_episode(self):
+        from unittest.mock import patch
+        session = PiperRecordingSession(str(Path(__file__).parent / "configs/piper_local_305.yaml"), Buttons(), 0.105)
+        session.update({"joint_rad": np.zeros(6)})
+        with patch.object(session.controller, "_stop_episode") as stop:
+            session.pause()
+            stop.assert_called_once()
+        with self.assertRaisesRegex(RuntimeError, "stale"):
+            session.snapshot()
+        self.assertTrue(session.controller._prev_a)
+
     def test_b_home_button_does_not_stop_hardware_recording_controller(self):
         buttons = Buttons()
         buttons.get_button_state_by_name = lambda name: name == "B"

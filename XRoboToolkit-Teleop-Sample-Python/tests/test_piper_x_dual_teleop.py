@@ -70,6 +70,80 @@ class FakeArm:
 
 
 class DualPiperTest(unittest.TestCase):
+    def test_unlimited_motion_bypasses_joint_and_cartesian_speed_caps(self):
+        xr = FakeXR()
+        runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0,
+                                  no_pose_filter=True, position_deadband=0, unlimited_motion=True)
+        controller = runtime.controller
+        controller._process_xr_pose(xr.get_pose_by_name("right_controller"), "right_hand")
+        xr.positions["right"] = 0.08
+        xyz, _ = controller._process_xr_pose(xr.get_pose_by_name("right_controller"), "right_hand")
+        self.assertAlmostEqual(np.linalg.norm(xyz), 0.08)
+        measured = np.asarray(HOME).copy()
+        target = np.clip(measured + 0.1, runtime.follower.lower, runtime.follower.upper)
+        np.testing.assert_allclose(runtime.follower.next(measured, target, True), target)
+        self.assertGreater(np.max(abs(target-measured)), np.deg2rad(1.2))
+        with self.assertRaisesRegex(RuntimeError, "tracking"):
+            runtime.follower.next(measured + 0.5, target, True)
+
+    def test_send_pause_cancels_homes_checks_feedback_and_keeps_can_connected(self):
+        from unittest.mock import Mock
+        xr = FakeXR()
+        runtimes = {s: SimpleNamespace(arm=FakeArm(), release_clutch=Mock()) for s in ("left", "right")}
+        homes = {s: SimpleNamespace(returning=True, follower=SimpleNamespace(last_command=np.ones(6)))
+                 for s in runtimes}
+        recorder = Mock()
+        def wait(*args, **kwargs):
+            kwargs["check_feedback"]()
+            self.assertTrue(kwargs["motors_enabled"])
+        with patch.object(entry, "wait_for_pico", side_effect=wait):
+            entry.pause_for_pico(xr, runtimes, homes, recorder)
+        recorder.pause.assert_called_once()
+        for side, runtime in runtimes.items():
+            runtime.release_clutch.assert_called_once()
+            self.assertTrue(runtime.rearm_required)
+            self.assertFalse(runtime.arm.closed)
+            self.assertEqual(runtime.arm.commands, [])
+            self.assertEqual(runtime.arm.grippers, [])
+            self.assertFalse(homes[side].returning)
+            self.assertTrue(homes[side].last_pressed)
+
+    def test_main_send_off_waits_and_resumes_only_after_button_release(self):
+        xr, frames, clock, solved, sent = FakeXR(), [0], [0.0], [], []
+        xr.get_timestamp_ns = lambda: 1 if frames[0] < 3 else frames[0]
+        xr.get_key_value_by_name = lambda name: float(frames[0] < 4)
+        runtime = SimpleNamespace(
+            side="right", channel="can1", arm=None,
+            follower=SimpleNamespace(lower=np.full(6, -1.), upper=np.full(6, 1.)),
+            solve=lambda measured: (solved.append(frames[0]) or np.zeros(6), False),
+            release_clutch=lambda: None,
+            send=lambda command, tick, **kw: sent.append((frames[0], command, kw)),
+        )
+        def wait(*args, **kwargs):
+            if "check_feedback" in kwargs:
+                kwargs["check_feedback"]()
+                frames[0] = 3
+        def sleep(_):
+            frames[0] += 1
+            clock[0] += 0.3
+            if frames[0] == 5:
+                raise KeyboardInterrupt
+        with patch("xrobotoolkit_teleop.common.xr_client.XrClient", return_value=xr), \
+             patch.object(entry, "TeleopArm", return_value=runtime), \
+             patch.object(entry, "PiperXCanArm", side_effect=lambda **kw: FakeArm()), \
+             patch.object(FakeArm, "read_joints", return_value=np.zeros(6)), \
+             patch.object(entry, "load_home_targets", return_value={"right": np.zeros(6)}), \
+             patch.object(entry, "wait_for_pico", side_effect=wait), \
+             patch.object(entry.time, "monotonic", side_effect=lambda: clock[0]), \
+             patch.object(entry.time, "sleep", side_effect=sleep):
+            with self.assertRaises(KeyboardInterrupt):
+                entry.main(enable_hardware=True)
+        self.assertEqual(solved, [0, 1, 4])
+        held = next(item for item in sent if item[0] == 3)
+        self.assertIsNone(held[1])
+        self.assertFalse(held[2]["update_gripper"])
+        self.assertTrue(xr.closed)
+
     def test_default_closed_loop_step_has_less_software_lag_than_old_settings(self):
         # Ideal feedback plant: measures software delay, not real motor latency.
         def settle(options):

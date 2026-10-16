@@ -112,6 +112,13 @@ class PiperRecordingSession:
         self.camera.start()
         _save_session_config(self.cfg)
 
+    def pause(self):
+        with self.lock:
+            self.state = None
+            self.updated = 0.0
+        self.controller._stop_episode()
+        self.controller._prev_a = True
+
     def update(self, state):
         with self.lock:
             self.state = {key: np.asarray(value, dtype=np.float32).copy()
