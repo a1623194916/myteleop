@@ -5,11 +5,16 @@ import time
 import numpy as np
 
 
+class JointTrackingError(RuntimeError):
+    """Recoverable tracking fault; requires a fresh clutch engagement."""
+
+
 class JointFollower:
     """Limit each commanded increment and require fresh, plausible feedback."""
 
     def __init__(self, lower, upper, max_step_rad: float = 0.006, max_error_rad: float = 0.2,
-                 feedback_limit_margin_rad: float = 0.05):
+                 feedback_limit_margin_rad: float = 0.05, tracking_timeout: float = 0.0,
+                 hard_error_rad: float = 0.6):
         self.lower = np.asarray(lower, dtype=float)
         self.upper = np.asarray(upper, dtype=float)
         if self.lower.shape != (6,) or self.upper.shape != (6,) or np.any(self.lower >= self.upper):
@@ -20,6 +25,9 @@ class JointFollower:
         self.max_error_rad = float(max_error_rad)
         self.feedback_limit_margin_rad = float(feedback_limit_margin_rad)
         self.last_command = None
+        self.tracking_timeout = tracking_timeout
+        self.hard_error_rad = hard_error_rad
+        self.error_started = None
 
     def next(self, measured, target, active: bool):
         """Return a bounded command, or None while the deadman is released."""
@@ -34,15 +42,29 @@ class JointFollower:
             raise RuntimeError("Piper-X joint feedback exceeds model limits")
         if not active:
             self.last_command = None
+            self.error_started = None
             return None
-        if self.last_command is not None and np.max(np.abs(measured - self.last_command)) > self.max_error_rad:
-            raise RuntimeError("Piper-X has stopped tracking the commanded joints")
+        error = (float(np.max(np.abs(measured - self.last_command)))
+                 if self.last_command is not None else 0.0)
+        if self.last_command is None or error <= self.max_error_rad:
+            self.error_started = None
+        else:
+            now = time.monotonic()
+            if self.error_started is None:
+                self.error_started = now
+            if error > self.hard_error_rad or now - self.error_started >= self.tracking_timeout:
+                raise JointTrackingError(f"Piper-X tracking error {np.rad2deg(error):.1f} deg; "
+                                         f"above {np.rad2deg(self.max_error_rad):.1f} deg for "
+                                         f"{now - self.error_started:.2f} s")
         origin = measured if self.last_command is None else self.last_command
         command = np.clip(
             origin + np.clip(target - origin, -self.max_step_rad, self.max_step_rad),
             self.lower,
             self.upper,
         )
+        if self.tracking_timeout > 0 and np.max(np.abs(command - measured)) > self.hard_error_rad:
+            raise JointTrackingError(f"Piper-X tracking target exceeds {self.hard_error_rad:g} rad "
+                                     "from feedback; re-clutch required")
         self.last_command = command.copy()
         return command
 

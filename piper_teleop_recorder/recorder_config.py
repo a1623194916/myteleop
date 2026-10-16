@@ -72,6 +72,9 @@ class ControlConfig:
     max_angular_speed: float = 1.5
     oneeuro_min_cutoff: float = 4.0
     oneeuro_beta: float = 2.0
+    oneeuro_derivative_cutoff: float = 10.0
+    oneeuro_rotation_min_cutoff: float = 3.0
+    oneeuro_rotation_beta: float = 3.0
     deadman_threshold: float = 0.9  # right_grip value above this engages teleop
     poll_rate_hz: float = 20.0  # button edge-detection poll rate
 

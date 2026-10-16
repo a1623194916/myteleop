@@ -23,7 +23,7 @@ while (( $# )); do
       echo 'Default: dual; left=can0, right=can1; A-key recording; NO headset video.'
       echo 'Right B returns right arm; left Y returns left arm; Ctrl+C exits. Home holds gripper.'
       echo '--home-config FILE sets saved poses; --home-speed-deg-s defaults to 15.'
-      echo 'Following defaults: software speed caps OFF, driver speed 100%, One-Euro cutoff 8 Hz.'
+      echo 'Following defaults: 100 Hz, software speed caps OFF, driver speed 100%, UR adaptive pose filter.'
       echo '--no-unlimited-motion restores software speed caps; --speed-percent sets driver speed.'
       echo 'PICO Send off pauses commands and waits for reconnection; release GRIP/TRIGGER to rearm.'
       echo 'Use --left-channel/--right-channel to change the mapping, or --channel in single mode.'

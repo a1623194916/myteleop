@@ -9,7 +9,7 @@ import mujoco
 import numpy as np
 import tyro
 
-from xrobotoolkit_teleop.hardware.piper_x import JointFollower, PiperXCanArm
+from xrobotoolkit_teleop.hardware.piper_x import JointFollower, JointTrackingError, PiperXCanArm
 from xrobotoolkit_teleop.hardware.piper_x_home import JointHomeReturn, load_home_targets
 from xrobotoolkit_teleop.simulation.piper_x_model import JOINTS, TCP_LINK, TCP_OFFSET_M, build_scene
 
@@ -72,9 +72,7 @@ def wait_for_pico(xr, sides, timeout=0.0, motors_enabled=False, check_feedback=N
         time.sleep(0.02)
 
 
-def pause_for_pico(xr, runtimes, homes, recording=None):
-    """No motion sends while Send is off; require fresh anchors on resume."""
-    print("PICO Send/tracking paused: holding commands; waiting for live data. Ctrl+C exits.", flush=True)
+def hold_for_rearm(runtimes, homes, recording=None):
     for side, runtime in runtimes.items():
         runtime.release_clutch()
         runtime.rearm_required = True
@@ -84,6 +82,12 @@ def pause_for_pico(xr, runtimes, homes, recording=None):
         homes[side].follower.last_command = None
     if recording is not None:
         recording.pause()
+
+
+def pause_for_pico(xr, runtimes, homes, recording=None):
+    """No motion sends while Send is off; require fresh anchors on resume."""
+    print("PICO Send/tracking paused: holding commands; waiting for live data. Ctrl+C exits.", flush=True)
+    hold_for_rearm(runtimes, homes, recording)
     def check_feedback():
         for runtime in runtimes.values():
             runtime.arm.read_joints()
@@ -98,7 +102,9 @@ class TeleopArm:
                  rate_hz=50.0, gripper_force=5.0, no_pose_filter=False,
                  position_deadband=0.001, rotation_deadband_deg=0.3,
                  max_linear_speed=0.5, max_angular_speed=1.5,
-                 oneeuro_min_cutoff=8.0, oneeuro_beta=2.0, unlimited_motion=False):
+                 oneeuro_min_cutoff=3.0, oneeuro_beta=40.0, unlimited_motion=False,
+                 oneeuro_derivative_cutoff=10.0, oneeuro_rotation_min_cutoff=3.0,
+                 oneeuro_rotation_beta=3.0):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -114,12 +120,16 @@ class TeleopArm:
             max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
             oneeuro_min_cutoff=oneeuro_min_cutoff, oneeuro_beta=oneeuro_beta,
             unlimited_motion=unlimited_motion,
+            oneeuro_derivative_cutoff=oneeuro_derivative_cutoff,
+            oneeuro_rotation_min_cutoff=oneeuro_rotation_min_cutoff,
+            oneeuro_rotation_beta=oneeuro_rotation_beta,
         )
         self.model = self.controller.mj_model
         self.joint_ids = [self.model.joint(name).id for name in JOINTS]
         limits = self.model.jnt_range[self.joint_ids]
         self.follower = JointFollower(limits[:, 0], limits[:, 1],
-                                      np.inf if unlimited_motion else np.deg2rad(max_joint_step_deg))
+                                      np.inf if unlimited_motion else np.deg2rad(max_joint_step_deg),
+                                      tracking_timeout=0.5)
         self.rearm_required = False
         self.arm = None
         self.last_command = None
@@ -158,6 +168,7 @@ class TeleopArm:
         self.controller.ref_ee_xyz[name] = None
         self.controller.ref_controller_xyz[name] = None
         self.follower.last_command = None
+        self.follower.error_started = None
 
     def send(self, command, tick, update_gripper=True, home_return=False):
         if command is not None:
@@ -228,7 +239,7 @@ def main(
     channel: str | None = None,
     enable_hardware: bool = False,
     firmware: str | None = None,
-    rate_hz: float = 50.0,
+    rate_hz: float = 100.0,
     max_joint_step_deg: float = 1.2,
     scale_factor: float = 1.0,
     speed_percent: int = 100,
@@ -240,8 +251,11 @@ def main(
     rotation_deadband_deg: float = 0.3,
     max_linear_speed: float = 0.5,
     max_angular_speed: float = 1.5,
-    oneeuro_min_cutoff: float = 8.0,
-    oneeuro_beta: float = 2.0,
+    oneeuro_min_cutoff: float = 3.0,
+    oneeuro_beta: float = 40.0,
+    oneeuro_derivative_cutoff: float = 10.0,
+    oneeuro_rotation_min_cutoff: float = 3.0,
+    oneeuro_rotation_beta: float = 3.0,
     read_only: bool = False,
     record_config: str | None = None,
     mode: Literal["single", "dual"] = "single",
@@ -278,8 +292,8 @@ def main(
         print("Preflight only: motors NOT enabled. Check CAN at 1 Mbit/s, e-stop and clear workspace.")
         print("Run with --enable-hardware only after the MuJoCo test and read-only feedback check.")
         return
-    if not 0 < rate_hz <= 50 or not 0 < max_joint_step_deg <= 2:
-        raise ValueError("Use 0 < rate_hz <= 50 and 0 < max_joint_step_deg <= 2")
+    if not 0 < rate_hz <= 100 or not 0 < max_joint_step_deg <= 2:
+        raise ValueError("Use 0 < rate_hz <= 100 and 0 < max_joint_step_deg <= 2")
     if not 0 < scale_factor <= 1 or not 1 <= speed_percent <= 100 or not 0 < gripper_max_width <= 0.1:
         raise ValueError("Invalid motion scale, speed percentage or gripper width")
     if not 0 < gripper_force <= 10 or position_deadband < 0 or rotation_deadband_deg < 0:
@@ -288,6 +302,8 @@ def main(
         raise ValueError("Cartesian speed limits must be positive")
     if oneeuro_min_cutoff <= 0 or oneeuro_beta < 0:
         raise ValueError("Invalid One-Euro filter parameters")
+    if oneeuro_derivative_cutoff <= 0 or oneeuro_rotation_min_cutoff <= 0 or oneeuro_rotation_beta < 0:
+        raise ValueError("Invalid One-Euro derivative/rotation parameters")
     if not 0 < home_speed_deg_s <= 30 or not 0 < home_timeout <= 120:
         raise ValueError("Use 0 < home-speed-deg-s <= 30 and 0 < home-timeout <= 120")
     home_targets = load_home_targets(home_config, selected)
@@ -307,6 +323,9 @@ def main(
                 max_linear_speed=max_linear_speed, max_angular_speed=max_angular_speed,
                 oneeuro_min_cutoff=oneeuro_min_cutoff, oneeuro_beta=oneeuro_beta,
                 unlimited_motion=unlimited_motion,
+                oneeuro_derivative_cutoff=oneeuro_derivative_cutoff,
+                oneeuro_rotation_min_cutoff=oneeuro_rotation_min_cutoff,
+                oneeuro_rotation_beta=oneeuro_rotation_beta,
             )
         homes = {}
         for side, runtime in runtimes.items():
@@ -332,6 +351,9 @@ def main(
                                                   "unlimited_motion": unlimited_motion,
                                                   "oneeuro_min_cutoff": oneeuro_min_cutoff,
                                                   "oneeuro_beta": oneeuro_beta,
+                                                  "oneeuro_derivative_cutoff": oneeuro_derivative_cutoff,
+                                                  "oneeuro_rotation_min_cutoff": oneeuro_rotation_min_cutoff,
+                                                  "oneeuro_rotation_beta": oneeuro_rotation_beta,
                                                   "home_config": str(Path(home_config).resolve()),
                                                   "home_joint_rad": {side: home.target.tolist() for side, home in homes.items()},
                                                   "home_speed_deg_s": home_speed_deg_s,
@@ -347,6 +369,9 @@ def main(
             recording.cfg.control.max_angular_speed = max_angular_speed
             recording.cfg.control.oneeuro_min_cutoff = oneeuro_min_cutoff
             recording.cfg.control.oneeuro_beta = oneeuro_beta
+            recording.cfg.control.oneeuro_derivative_cutoff = oneeuro_derivative_cutoff
+            recording.cfg.control.oneeuro_rotation_min_cutoff = oneeuro_rotation_min_cutoff
+            recording.cfg.control.oneeuro_rotation_beta = oneeuro_rotation_beta
             recording.cfg.can.motion_mode = motion_mode
             recording.cfg.can.channel = next(iter(selected.values()))
             recording.cfg.can.firmware = firmware
@@ -388,6 +413,9 @@ def main(
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
               f"Cartesian cap={cartesian_cap}; mode={motion_mode}; "
               f"gripper={gripper_force:g} N (release TRIGGER once to arm closing).")
+        print(f"One-Euro: position cutoff={oneeuro_min_cutoff:g}, beta={oneeuro_beta:g}; "
+              f"rotation cutoff={oneeuro_rotation_min_cutoff:g}, beta={oneeuro_rotation_beta:g}; "
+              f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace=0.5 s.")
         period = 1.0 / rate_hz
         next_gripper_report = time.monotonic() + 2.0
         report_started, report_cycles = time.monotonic(), 0
@@ -416,24 +444,29 @@ def main(
                 continue
             measured = {side: runtime.arm.read_joints() for side, runtime in runtimes.items()}
             solutions, home_handled = {}, {}
-            for side, runtime in runtimes.items():
-                if getattr(runtime, "rearm_required", False):
-                    if (xr.get_key_value_by_name(f"{side}_grip") > 0.9
-                            or xr.get_key_value_by_name(f"{side}_trigger") > 0.05):
-                        home_handled[side] = True
-                        solutions[side] = (None, False)
-                        continue
-                    runtime.rearm_required = False
-                command, handled = homes[side].step(
-                    measured[side], xr.get_button_state_by_name("B" if side == "right" else "Y"),
-                    xr.get_key_value_by_name(f"{side}_grip") > 0.9, tick,
-                )
-                home_handled[side] = handled
-                if handled:
-                    runtime.release_clutch()
-                    solutions[side] = (command, False)
-                else:
-                    solutions[side] = runtime.solve(measured[side])
+            try:
+                for side, runtime in runtimes.items():
+                    if getattr(runtime, "rearm_required", False):
+                        if (xr.get_key_value_by_name(f"{side}_grip") > 0.9
+                                or xr.get_key_value_by_name(f"{side}_trigger") > 0.05):
+                            home_handled[side] = True
+                            solutions[side] = (None, False)
+                            continue
+                        runtime.rearm_required = False
+                    command, handled = homes[side].step(
+                        measured[side], xr.get_button_state_by_name("B" if side == "right" else "Y"),
+                        xr.get_key_value_by_name(f"{side}_grip") > 0.9, tick,
+                    )
+                    home_handled[side] = handled
+                    if handled:
+                        runtime.release_clutch()
+                        solutions[side] = (command, False)
+                    else:
+                        solutions[side] = runtime.solve(measured[side])
+            except JointTrackingError as exc:
+                print(f"[tracking hold] {exc}; release GRIP/TRIGGER, then re-clutch to retry.", flush=True)
+                hold_for_rearm(runtimes, homes, recording)
+                continue
             for side, runtime in runtimes.items():
                 runtime.send(solutions[side][0], tick, update_gripper=not home_handled[side],
                              home_return=home_handled[side])

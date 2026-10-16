@@ -70,6 +70,39 @@ class FakeArm:
 
 
 class DualPiperTest(unittest.TestCase):
+    def test_main_tracking_fault_holds_then_allows_reclutch_instead_of_exiting(self):
+        xr, frames, solved, sent = FakeXR(), [0], [], []
+        xr.get_key_value_by_name = lambda name: float(frames[0] == 0)
+        def solve(measured):
+            solved.append(frames[0])
+            if len(solved) == 1:
+                raise entry.JointTrackingError("simulated tracking fault")
+            return np.zeros(6), False
+        runtime = SimpleNamespace(
+            side="right", channel="can1", arm=None,
+            follower=SimpleNamespace(lower=np.full(6, -1.), upper=np.full(6, 1.)),
+            solve=solve, release_clutch=lambda: None,
+            send=lambda command, tick, **kw: sent.append((frames[0], command, kw)),
+        )
+        def sleep(_):
+            frames[0] += 1
+            if frames[0] == 2:
+                raise KeyboardInterrupt
+        with patch("xrobotoolkit_teleop.common.xr_client.XrClient", return_value=xr), \
+             patch.object(entry, "TeleopArm", return_value=runtime), \
+             patch.object(entry, "PiperXCanArm", side_effect=lambda **kw: FakeArm()), \
+             patch.object(FakeArm, "read_joints", return_value=np.zeros(6)), \
+             patch.object(entry, "load_home_targets", return_value={"right": np.zeros(6)}), \
+             patch.object(entry, "wait_for_pico"), \
+             patch.object(entry.time, "sleep", side_effect=sleep):
+            with self.assertRaises(KeyboardInterrupt):
+                entry.main(enable_hardware=True)
+        self.assertEqual(solved, [0, 1])
+        self.assertIsNone(sent[0][1])
+        self.assertFalse(sent[0][2]["update_gripper"])
+        self.assertIsNotNone(sent[1][1])
+        self.assertTrue(xr.closed)
+
     def test_unlimited_motion_bypasses_joint_and_cartesian_speed_caps(self):
         xr = FakeXR()
         runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0,
@@ -84,7 +117,7 @@ class DualPiperTest(unittest.TestCase):
         np.testing.assert_allclose(runtime.follower.next(measured, target, True), target)
         self.assertGreater(np.max(abs(target-measured)), np.deg2rad(1.2))
         with self.assertRaisesRegex(RuntimeError, "tracking"):
-            runtime.follower.next(measured + 0.5, target, True)
+            runtime.follower.next(measured, np.clip(measured + 0.8, runtime.follower.lower, runtime.follower.upper), True)
 
     def test_send_pause_cancels_homes_checks_feedback_and_keeps_can_connected(self):
         from unittest.mock import Mock
