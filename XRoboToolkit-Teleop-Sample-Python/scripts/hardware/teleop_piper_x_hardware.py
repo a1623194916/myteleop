@@ -105,7 +105,8 @@ class TeleopArm:
                  oneeuro_min_cutoff=3.0, oneeuro_beta=40.0, unlimited_motion=False,
                  oneeuro_derivative_cutoff=10.0, oneeuro_rotation_min_cutoff=3.0,
                  oneeuro_rotation_beta=3.0, servo_slew_deg=None,
-                 tracking_error_deg=20.0, tracking_timeout=0.8):
+                 tracking_error_deg=20.0, tracking_timeout=0.8,
+                 gripper_slew_mm_s=150.0):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -145,6 +146,9 @@ class TeleopArm:
         self.last_gripper_time = 0.0
         self.gripper_command_m = np.nan
         self.gripper_force = gripper_force
+        self.gripper_slew_m_per_s = max(0.0, float(gripper_slew_mm_s)) / 1000.0
+        self.gripper_command_norm = None
+        self.gripper_slew_time = 0.0
         self.gripper_armed = False  # Require a released trigger after initial opening.
         self.last_trigger = 0.0
         self.last_trigger_at_send = 0.0
@@ -203,11 +207,25 @@ class TeleopArm:
             opening = 1.0 - (trigger - 0.05) / 0.9
         # Like UR, trigger is independent of the arm clutch. Periodic refresh also
         # recovers a lost CAN target, rather than sending each width only once.
+        # Slew-limit the commanded stroke. The gripper takes a position and a
+        # force, with no speed field, so a step command lets the jaws travel to
+        # the end stop at full speed - the release slam. Ramp the position
+        # instead; the effector follows the intermediate targets.
+        span = float(self.arm.gripper_max_width) or 1.0
+        if self.gripper_command_norm is None:
+            self.gripper_command_norm = opening
+            self.gripper_slew_time = tick
+        max_step = self.gripper_slew_m_per_s * max(tick - self.gripper_slew_time, 1e-3) / span
+        delta = float(np.clip(opening - self.gripper_command_norm, -max_step, max_step))
+        self.gripper_command_norm = float(np.clip(self.gripper_command_norm + delta, 0.0, 1.0))
+        self.gripper_slew_time = tick
+        commanded = self.gripper_command_norm
         due = tick - self.last_gripper_time
-        if due >= 0.1 and (self.last_gripper is None or abs(opening - self.last_gripper) > 0.03 or due >= 0.5):
-            self.arm.set_gripper(opening, force=self.gripper_force)
-            self.gripper_command_m = opening * self.arm.gripper_max_width
-            self.last_gripper, self.last_gripper_time = opening, tick
+        if due >= 0.02 and (self.last_gripper is None or abs(commanded - self.last_gripper) > 0.004
+                            or due >= 0.5):
+            self.arm.set_gripper(commanded, force=self.gripper_force)
+            self.gripper_command_m = commanded * span
+            self.last_gripper, self.last_gripper_time = commanded, tick
             # Remember which trigger sample produced this width; the live trigger
             # keeps moving, so reporting it next to a rate-limited width looks
             # like a broken mapping.
@@ -279,7 +297,7 @@ def main(
     speed_percent: int = 100,
     gripper_max_width: float = 0.10,
     gripper_force: float = 5.0,
-    motion_mode: Literal["j", "js", "mit"] = "mit",
+    motion_mode: Literal["j", "js", "mit"] = "js",
     mit_kp: float = 10.0,
     mit_kd: float = 0.8,
     no_pose_filter: bool = False,
@@ -311,6 +329,7 @@ def main(
     strict_rearm: bool = False,
     skip_gripper_check: bool = False,
     allow_gripper_fault: bool = False,
+    gripper_slew_mm_s: float = 150.0,
 ) -> None:
     """Independent GRIP/TRIGGER; A records; B returns right, Y returns left; Ctrl+C exits."""
     selected = select_arms(mode, controller_side, channel, left_channel, right_channel)
@@ -354,6 +373,8 @@ def main(
         raise ValueError("Use 0 < servo-slew-deg <= 15 (per cycle joint command slew)")
     if not 5 <= tracking_error_deg <= 60 or not 0.1 <= tracking_timeout <= 5:
         raise ValueError("Use 5 <= tracking-error-deg <= 60 and 0.1 <= tracking-timeout <= 5")
+    if not 0 < gripper_slew_mm_s <= 1000:
+        raise ValueError("Use 0 < gripper-slew-mm-s <= 1000; 0 would disable the stroke ramp")
     home_targets = load_home_targets(home_config, selected)
 
     from xrobotoolkit_teleop.common.xr_client import XrClient
@@ -377,6 +398,7 @@ def main(
                 servo_slew_deg=(max_joint_step_deg if not unlimited_motion else servo_slew_deg),
                 tracking_error_deg=tracking_error_deg,
                 tracking_timeout=tracking_timeout,
+                gripper_slew_mm_s=gripper_slew_mm_s,
             )
         homes = {}
         for side, runtime in runtimes.items():
@@ -415,6 +437,7 @@ def main(
                                                   "servo_slew_deg": max_joint_step_deg if not unlimited_motion else servo_slew_deg,
                                                   "tracking_error_deg": tracking_error_deg,
                                                   "tracking_timeout_s": tracking_timeout,
+                                                  "gripper_slew_mm_s": gripper_slew_mm_s,
                                               })
             recording.cfg.control.rate_hz = rate_hz
             recording.cfg.control.max_joint_step_deg = max_joint_step_deg
@@ -468,6 +491,8 @@ def main(
                 print(f"[{runtime.side}] WARNING: {exc} -- continuing with "
                       f"--allow-gripper-fault; TRIGGER will have no effect.", flush=True)
             runtime.last_gripper = 1.0
+            runtime.gripper_command_norm = 1.0
+            runtime.gripper_slew_time = time.monotonic()
             runtime.gripper_command_m = runtime.arm.gripper_max_width
             runtime.last_gripper_time = time.monotonic()
         # `open_gripper` only proves the width READS as the full stroke, which is
@@ -499,10 +524,15 @@ def main(
         print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint slew cap={joint_cap}, "
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
               f"Cartesian cap={cartesian_cap}; mode={motion_mode}; "
-              f"gripper={gripper_force:g} N (release TRIGGER once to arm closing).")
+              f"gripper={gripper_force:g} N, stroke ramp={gripper_slew_mm_s:g} mm/s "
+              f"(release TRIGGER once to arm closing).")
         print(f"One-Euro: position cutoff={oneeuro_min_cutoff:g}, beta={oneeuro_beta:g}; "
               f"rotation cutoff={oneeuro_rotation_min_cutoff:g}, beta={oneeuro_rotation_beta:g}; "
               f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace={tracking_timeout:g} s.")
+        if motion_mode == "mit":
+            print("NOTE: motion mode 'mit' measured ~11 deg of joint tracking lag on "
+                  "firmware S-V1.9-0 (a 20 deg, 10 deg/s ramp); 'js' measured ~1.2 deg and "
+                  "'j' ~0.4 deg. Expect soft, trailing motion until the mode changes.")
         print(f"Tracking guard: fault above {tracking_error_deg:g} deg for {tracking_timeout:g} s; "
               + ("hold and auto-resume (release GRIP to re-clutch manually)."
                  if not strict_rearm else "stop and require a fresh GRIP re-clutch."))

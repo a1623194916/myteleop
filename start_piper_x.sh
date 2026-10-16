@@ -24,7 +24,7 @@ while (( $# )); do
       echo 'Right B returns right arm; left Y returns left arm; Ctrl+C exits. Home holds gripper.'
       echo '--home-config FILE sets saved poses; --home-speed-deg-s defaults to 15.'
       echo 'Following defaults: 100 Hz, joint slew 2 deg/cycle, driver speed 100%, UR adaptive pose filter.'
-      echo 'Servo default: --motion-mode mit --mit-kp 10 --mit-kd 0.8; --motion-mode js selects joint streaming.'
+      echo 'Servo default: --motion-mode js (measured ~1 deg joint lag); --motion-mode j ~0.4 deg; --motion-mode mit ~11 deg.'
       echo '--servo-slew-deg N caps the per-cycle joint step; --no-unlimited-motion restores software speed caps; --speed-percent sets driver speed.'
       echo '--tracking-error-deg / --tracking-timeout-s set the tracking guard thresholds; --strict-rearm stops instead of auto-resuming.'
       echo '--skip-gripper-check skips the startup stroke probe; --allow-gripper-fault keeps the arm usable if the effector fails.'

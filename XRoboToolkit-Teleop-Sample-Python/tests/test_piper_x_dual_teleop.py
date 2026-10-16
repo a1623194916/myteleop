@@ -424,21 +424,32 @@ class DualPiperTest(unittest.TestCase):
         reset, _ = controller._process_xr_pose(xr.get_pose_by_name("left_controller"), "left_hand")
         np.testing.assert_allclose(reset, 0)
 
-    def test_initial_gripper_stays_open_until_trigger_release_and_endpoints_snap(self):
+    def test_gripper_waits_for_release_and_ramps_between_endpoints(self):
+        # The gripper takes position and force only, so a step command lets the
+        # jaws hit the end stop at full speed. Endpoints must be ramped.
         xr = FakeXR()
         runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0, 0.6)
         runtime.arm = FakeArm()
         xr.values["right_trigger"] = 1.0
         runtime.send(None, 10)
-        self.assertEqual(runtime.arm.grippers[-1], 1.0)
+        self.assertEqual(runtime.arm.grippers[-1], 1.0)  # still holding open
         xr.values["right_trigger"] = 0.03
         runtime.send(None, 10.2)
         self.assertTrue(runtime.gripper_armed)
         xr.values["right_trigger"] = 0.97
         runtime.send(None, 10.4)
-        self.assertEqual(runtime.arm.grippers[-1], 0.0)
+        first = runtime.arm.grippers[-1]
+        self.assertGreater(first, 0.0)
+        self.assertLess(first, 1.0)
+        runtime.send(None, 10.5)
+        self.assertLess(runtime.arm.grippers[-1], first)
+        runtime.send(None, 11.0)
+        self.assertEqual(runtime.arm.grippers[-1], 0.0)  # reaches the stop
         xr.values["right_trigger"] = 0.01
-        runtime.send(None, 10.6)
+        runtime.send(None, 11.2)
+        self.assertGreater(runtime.arm.grippers[-1], 0.0)
+        self.assertLess(runtime.arm.grippers[-1], 1.0)
+        runtime.send(None, 12.0)
         self.assertEqual(runtime.arm.grippers[-1], 1.0)
 
     def test_filtered_hand_step_reaches_within_six_mm_in_100ms(self):
