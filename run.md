@@ -92,14 +92,14 @@ bash start_piper_x.sh --mode dual --no-camera --enable-hardware
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-bash start_piper_x.sh --mode single --controller-side right --channel can1 --no-camera --enable-hardware --motion-mode mit
+bash start_piper_x.sh --mode single --controller-side right --channel can1 --no-camera --enable-hardware
 ```
 
 #### 单臂左臂
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-bash start_piper_x.sh --mode single --controller-side left --channel can0 --no-camera --enable-hardware --motion-mode mit
+bash start_piper_x.sh --mode single --controller-side left --channel can0 --no-camera --enable-hardware
 ```
 
 ### 操作按键
