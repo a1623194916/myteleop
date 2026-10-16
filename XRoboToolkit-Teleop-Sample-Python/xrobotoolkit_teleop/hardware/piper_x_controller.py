@@ -17,7 +17,8 @@ from ur_vr_teleop.vr_teleop_math import (
 class PiperTeleopController(MujocoTeleopController):
     def __init__(self, *args, pose_filter=True, position_deadband=0.001,
                  rotation_deadband_deg=0.3, max_linear_speed=0.5,
-                 max_angular_speed=1.5, oneeuro_min_cutoff=4.0, oneeuro_beta=2.0, **kwargs):
+                 max_angular_speed=1.5, oneeuro_min_cutoff=8.0, oneeuro_beta=2.0, **kwargs):
+        self.input_position_gap_m = 0.0
         self.pose_filter = OneEuroPoseFilter(min_cutoff=oneeuro_min_cutoff, beta=oneeuro_beta) if pose_filter else None
         self.deadband = CartesianDeadband(position_deadband, np.deg2rad(rotation_deadband_deg))
         if max_linear_speed <= 0 or max_angular_speed <= 0:
@@ -43,4 +44,5 @@ class PiperTeleopController(MujocoTeleopController):
             if self.pose_filter is not None:
                 target = self.pose_filter.advance(target, self.dt)
             output = self.limiter.advance(self.deadband.advance(target), self.dt)
+            self.input_position_gap_m = float(np.linalg.norm(xyz - output[:3]))
         return output[:3], output[3:]

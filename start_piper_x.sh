@@ -23,6 +23,7 @@ while (( $# )); do
       echo 'Default: dual; left=can0, right=can1; A-key recording; NO headset video.'
       echo 'Right B returns right arm; left Y returns left arm; Ctrl+C exits. Home holds gripper.'
       echo '--home-config FILE sets saved poses; --home-speed-deg-s defaults to 15.'
+      echo 'Following defaults: 60 deg/s joint target cap (1.2 deg at 50 Hz), One-Euro cutoff 8 Hz.'
       echo 'Use --left-channel/--right-channel to change the mapping, or --channel in single mode.'
       echo '--no-camera disables capture/recording; --video enables optional headset video.'
       echo '--read-only checks feedback without motor enable; --enable-hardware enables real teleoperation.'

@@ -6,9 +6,10 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import mujoco
 
 from scripts.hardware import teleop_piper_x_hardware as entry
-from xrobotoolkit_teleop.simulation.piper_x_model import HOME, build_scene
+from xrobotoolkit_teleop.simulation.piper_x_model import HOME, TCP_LINK, build_scene
 
 
 class FakeXR:
@@ -69,6 +70,34 @@ class FakeArm:
 
 
 class DualPiperTest(unittest.TestCase):
+    def test_default_closed_loop_step_has_less_software_lag_than_old_settings(self):
+        # Ideal feedback plant: measures software delay, not real motor latency.
+        def settle(options):
+            xr = FakeXR()
+            xr.values["right_grip"] = 1.0
+            runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0, **options)
+            measured = np.asarray(HOME).copy()
+            runtime.solve(measured)
+            origin = runtime.controller.mj_data.body(TCP_LINK).xpos.copy()
+            xr.positions["right"] = 0.03
+            previous = None
+            for index in range(40):
+                command, _ = runtime.solve(measured)
+                if previous is not None:
+                    self.assertLessEqual(np.max(abs(command - previous)), runtime.follower.max_step_rad + 1e-9)
+                previous = command.copy()
+                measured = command
+                for value, jid in zip(measured, runtime.joint_ids):
+                    runtime.controller.mj_data.qpos[runtime.model.jnt_qposadr[jid]] = value
+                mujoco.mj_forward(runtime.model, runtime.controller.mj_data)
+                distance = np.linalg.norm(runtime.controller.mj_data.body(TCP_LINK).xpos - origin)
+                if distance >= 0.027:
+                    return index + 1
+            self.fail("3 cm target failed to settle")
+        old = settle({"max_joint_step_deg": 0.6, "oneeuro_min_cutoff": 4.0})
+        current = settle({})
+        self.assertLessEqual(current, old * 0.6)
+
     def test_main_b_returns_only_right_and_y_returns_left_without_exiting(self):
         xr, frames, sent, solved = FakeXR(), [0], [], []
         xr.get_button_state_by_name = lambda name: frames[0] >= (1 if name == "B" else 2)

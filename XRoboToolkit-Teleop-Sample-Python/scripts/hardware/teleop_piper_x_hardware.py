@@ -73,11 +73,11 @@ def wait_for_pico(xr, sides, timeout=0.0, motors_enabled=False):
 class TeleopArm:
     """One arm's IK, clutch and gripper state; XR is shared across both arms."""
 
-    def __init__(self, side, channel, xr, urdf, scene, scale_factor, max_joint_step_deg,
+    def __init__(self, side, channel, xr, urdf, scene, scale_factor, max_joint_step_deg=1.2,
                  rate_hz=50.0, gripper_force=5.0, no_pose_filter=False,
                  position_deadband=0.001, rotation_deadband_deg=0.3,
                  max_linear_speed=0.5, max_angular_speed=1.5,
-                 oneeuro_min_cutoff=4.0, oneeuro_beta=2.0):
+                 oneeuro_min_cutoff=8.0, oneeuro_beta=2.0):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -105,8 +105,11 @@ class TeleopArm:
         self.gripper_force = gripper_force
         self.gripper_armed = False  # Require a released trigger after initial opening.
         self.last_trigger = 0.0
+        self.follow_metrics = {}
 
     def solve(self, measured):
+        started = time.monotonic()
+        previous = self.last_command
         for index, joint_id in enumerate(self.joint_ids):
             self.controller.mj_data.qpos[self.model.jnt_qposadr[joint_id]] = measured[index]
         mujoco.mj_forward(self.model, self.controller.mj_data)
@@ -114,7 +117,17 @@ class TeleopArm:
         self.controller._send_command()
         target = self.controller.mj_data.ctrl[:6].copy()
         active = self.xr.get_key_value_by_name(f"{self.side}_grip") > 0.9
-        return self.follower.next(measured, target, active), active
+        command = self.follower.next(measured, target, active)
+        if active:
+            # Compare feedback with the PREVIOUS sent command: the current
+            # command cannot have reached hardware when this sample was taken.
+            self.follow_metrics = {
+                "input_mm": self.controller.input_position_gap_m * 1000,
+                "limit_deg": float(np.rad2deg(np.max(np.abs(target - command)))),
+                "drive_deg": float(np.rad2deg(np.max(np.abs(measured - previous)))) if previous is not None else 0.0,
+                "ik_ms": (time.monotonic() - started) * 1000,
+            }
+        return command, active
 
     def release_clutch(self):
         name = f"{self.side}_hand"
@@ -192,7 +205,7 @@ def main(
     enable_hardware: bool = False,
     firmware: str | None = None,
     rate_hz: float = 50.0,
-    max_joint_step_deg: float = 0.6,
+    max_joint_step_deg: float = 1.2,
     scale_factor: float = 1.0,
     speed_percent: int = 30,
     gripper_max_width: float = 0.10,
@@ -203,7 +216,7 @@ def main(
     rotation_deadband_deg: float = 0.3,
     max_linear_speed: float = 0.5,
     max_angular_speed: float = 1.5,
-    oneeuro_min_cutoff: float = 4.0,
+    oneeuro_min_cutoff: float = 8.0,
     oneeuro_beta: float = 2.0,
     read_only: bool = False,
     record_config: str | None = None,
@@ -240,8 +253,8 @@ def main(
         print("Preflight only: motors NOT enabled. Check CAN at 1 Mbit/s, e-stop and clear workspace.")
         print("Run with --enable-hardware only after the MuJoCo test and read-only feedback check.")
         return
-    if not 0 < rate_hz <= 50 or not 0 < max_joint_step_deg <= 1:
-        raise ValueError("Use 0 < rate_hz <= 50 and 0 < max_joint_step_deg <= 1")
+    if not 0 < rate_hz <= 50 or not 0 < max_joint_step_deg <= 2:
+        raise ValueError("Use 0 < rate_hz <= 50 and 0 < max_joint_step_deg <= 2")
     if not 0 < scale_factor <= 1 or not 1 <= speed_percent <= 100 or not 0 < gripper_max_width <= 0.1:
         raise ValueError("Invalid motion scale, speed percentage or gripper width")
     if not 0 < gripper_force <= 10 or position_deadband < 0 or rotation_deadband_deg < 0:
@@ -349,9 +362,11 @@ def main(
         period = 1.0 / rate_hz
         next_gripper_report = time.monotonic() + 2.0
         report_started, report_cycles = time.monotonic(), 0
+        max_packet_gap = 0.0
         while True:
             tick = time.monotonic()
             current_timestamp = xr.get_timestamp_ns()
+            max_packet_gap = max(max_packet_gap, tick - packet_time)
             if current_timestamp != timestamp and current_timestamp > 0:
                 timestamp, packet_time = current_timestamp, tick
             if tick - packet_time > 0.5:
@@ -378,15 +393,20 @@ def main(
             report_cycles += 1
             if tick >= next_gripper_report:
                 actual_hz = report_cycles / max(tick - report_started, 1e-6)
-                print(f"[loop] actual={actual_hz:.1f} Hz / requested={rate_hz:g} Hz", flush=True)
+                print(f"[loop] actual={actual_hz:.1f} Hz / requested={rate_hz:g} Hz; "
+                      f"PICO max update gap={max_packet_gap * 1000:.0f} ms (not end-to-end latency)", flush=True)
+                max_packet_gap = 0.0
                 for side, runtime in runtimes.items():
                     runtime.report_gripper()
                     if solutions[side][1]:
                         target = runtime.controller.effector_task[f"{side}_hand"].T_world_frame[:3, 3]
                         actual = runtime.controller.mj_data.body(TCP_LINK).xpos
                         error_mm = np.linalg.norm(target - actual) * 1000
-                        joint_error = np.rad2deg(np.max(np.abs(runtime.last_command - measured[side])))
-                        print(f"[{side}] follow error: TCP={error_mm:.1f} mm, joints={joint_error:.2f} deg", flush=True)
+                        m = runtime.follow_metrics
+                        print(f"[{side}] follow: TCP={error_mm:.1f} mm; "
+                              f"input(filter/rate)={m['input_mm']:.1f} mm; "
+                              f"joint-limit={m['limit_deg']:.2f} deg; "
+                              f"drive(previous target)={m['drive_deg']:.2f} deg; IK={m['ik_ms']:.1f} ms", flush=True)
                 report_started, report_cycles = tick, 0
                 next_gripper_report = tick + 2.0
             if recording:
