@@ -1,5 +1,6 @@
 """Piper IK with the same pose stabilization primitives used by UR teleop."""
 
+import math
 import sys
 from pathlib import Path
 
@@ -18,13 +19,38 @@ from ur_vr_teleop.vr_teleop_math import (
 )
 
 
+ROTATION_LIMIT_RAD = math.pi
+
+
+def scale_rotvec(rotvec, scale, maximum=ROTATION_LIMIT_RAD):
+    """Scale an angle-axis delta and saturate it at the representation limit.
+
+    ``apply_delta_pose`` hands the angle straight to ``quaternion_about_axis``,
+    which does not fold it back into (-pi, pi]. A scaled norm above pi would
+    therefore be read as the reflex angle and the arm would swing the other way
+    at the wrap point. Saturating keeps the motion monotone: the wrist stops at
+    the limit and picks up again as the hand comes back.
+
+    Returns the scaled vector plus whether it hit the limit.
+    """
+    scaled = np.asarray(rotvec, dtype=float) * float(scale)
+    norm = float(np.linalg.norm(scaled))
+    if norm <= maximum or norm < 1e-12:
+        return scaled, False
+    return scaled * (maximum / norm), True
+
+
 class PiperTeleopController(MujocoTeleopController):
     def __init__(self, *args, pose_filter=True, position_deadband=0.001,
                  rotation_deadband_deg=0.3, max_linear_speed=0.5,
                  max_angular_speed=1.5, oneeuro_min_cutoff=3.0, oneeuro_beta=40.0,
                  oneeuro_derivative_cutoff=10.0, oneeuro_rotation_min_cutoff=3.0,
-                 oneeuro_rotation_beta=3.0,
+                 oneeuro_rotation_beta=3.0, rotation_scale=1.0,
                  unlimited_motion=False, **kwargs):
+        if not 0 < rotation_scale <= 3:
+            raise ValueError("rotation_scale must be in (0, 3]")
+        self.rotation_scale = float(rotation_scale)
+        self.rotation_saturated = False
         self.unlimited_motion = unlimited_motion
         self.input_position_gap_m = 0.0
         self.pose_filter = OneEuroPoseFilter(
@@ -86,6 +112,12 @@ class PiperTeleopController(MujocoTeleopController):
             if self.pose_filter is not None:
                 target = self.pose_filter.advance(target, self.dt)
             target = self.deadband.advance(target)
+            # Scale the rotation last. The filter and the deadband are hand-side
+            # conditioning, so they stay in hand units and keep the same noise
+            # and jitter behaviour no matter how the hand maps onto the arm.
+            target[3:], self.rotation_saturated = scale_rotvec(
+                target[3:], self.rotation_scale
+            )
             if self.unlimited_motion:
                 output = target.copy()
                 self.limiter.reset(output)  # Jump rejection still holds the last target.

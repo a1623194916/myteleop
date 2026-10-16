@@ -26,6 +26,7 @@ while (( $# )); do
       echo 'Following defaults: 100 Hz, joint slew 2 deg/cycle, driver speed 100%, UR adaptive pose filter.'
       echo 'Servo default: --motion-mode js (measured ~1 deg joint lag); --motion-mode j ~0.4 deg; --motion-mode mit ~11 deg.'
       echo '--servo-slew-deg N caps the per-cycle joint step; --no-unlimited-motion restores software speed caps; --speed-percent sets driver speed.'
+      echo '--scale-factor S shrinks hand translation (0..1); --rotation-scale R amplifies hand rotation (default 1.4, saturates at 180 deg of tool rotation).'
       echo '--tracking-error-deg / --tracking-timeout-s set the tracking guard thresholds; --strict-rearm stops instead of auto-resuming.'
       echo '--skip-gripper-check skips the startup stroke probe; --allow-gripper-fault keeps the arm usable if the effector fails.'
       echo '--gripper-slew-mm-s N ramps the stroke (default 250 mm/s => 0.4 s full stroke; the effector itself does ~385 mm/s).'

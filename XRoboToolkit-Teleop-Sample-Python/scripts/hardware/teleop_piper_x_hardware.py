@@ -106,7 +106,7 @@ class TeleopArm:
                  oneeuro_derivative_cutoff=10.0, oneeuro_rotation_min_cutoff=3.0,
                  oneeuro_rotation_beta=3.0, servo_slew_deg=None,
                  tracking_error_deg=20.0, tracking_timeout=0.8,
-                 gripper_slew_mm_s=250.0):
+                 gripper_slew_mm_s=250.0, rotation_scale=1.0):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -125,6 +125,7 @@ class TeleopArm:
             oneeuro_derivative_cutoff=oneeuro_derivative_cutoff,
             oneeuro_rotation_min_cutoff=oneeuro_rotation_min_cutoff,
             oneeuro_rotation_beta=oneeuro_rotation_beta,
+            rotation_scale=rotation_scale,
         )
         self.model = self.controller.mj_model
         self.joint_ids = [self.model.joint(name).id for name in JOINTS]
@@ -173,6 +174,7 @@ class TeleopArm:
                 "ik_residual_mm": self.controller.last_ik_result.position_error_m * 1000,
                 "ik_residual_deg": np.rad2deg(self.controller.last_ik_result.rotation_error_rad),
                 "ik_reached": self.controller.last_ik_result.reached,
+                "rot_sat": bool(self.controller.rotation_saturated),
             }
         return command, active
 
@@ -294,6 +296,7 @@ def main(
     rate_hz: float = 100.0,
     max_joint_step_deg: float = 1.2,
     scale_factor: float = 1.0,
+    rotation_scale: float = 1.4,
     speed_percent: int = 100,
     gripper_max_width: float = 0.10,
     gripper_force: float = 5.0,
@@ -357,6 +360,8 @@ def main(
         raise ValueError("Use 0 < rate_hz <= 100 and 0 < max_joint_step_deg <= 2")
     if not 0 < scale_factor <= 1 or not 1 <= speed_percent <= 100 or not 0 < gripper_max_width <= 0.1:
         raise ValueError("Invalid motion scale, speed percentage or gripper width")
+    if not 0 < rotation_scale <= 3:
+        raise ValueError("Use 0 < rotation-scale <= 3 (1.0 keeps 1:1 hand-to-tool rotation)")
     if not 0 < gripper_force <= 10 or position_deadband < 0 or rotation_deadband_deg < 0:
         raise ValueError("Invalid gripper force (0..10 N) or pose deadband")
     if not np.isfinite(mit_kp) or not np.isfinite(mit_kd) or not 0 < mit_kp <= 500 or not 0 < mit_kd <= 5:
@@ -399,6 +404,7 @@ def main(
                 tracking_error_deg=tracking_error_deg,
                 tracking_timeout=tracking_timeout,
                 gripper_slew_mm_s=gripper_slew_mm_s,
+                rotation_scale=rotation_scale,
             )
         homes = {}
         for side, runtime in runtimes.items():
@@ -438,10 +444,12 @@ def main(
                                                   "tracking_error_deg": tracking_error_deg,
                                                   "tracking_timeout_s": tracking_timeout,
                                                   "gripper_slew_mm_s": gripper_slew_mm_s,
+                                                  "rotation_scale": rotation_scale,
                                               })
             recording.cfg.control.rate_hz = rate_hz
             recording.cfg.control.max_joint_step_deg = max_joint_step_deg
             recording.cfg.control.scale_factor = scale_factor
+            recording.cfg.control.rotation_scale = rotation_scale
             recording.cfg.control.no_pose_filter = no_pose_filter
             recording.cfg.control.position_deadband = position_deadband
             recording.cfg.control.rotation_deadband_deg = rotation_deadband_deg
@@ -521,12 +529,19 @@ def main(
         joint_cap = (f'{rate_hz * joint_slew:g} deg/s ({joint_slew:g} deg/cycle)'
                      if joint_slew > 0 else 'off')
         cartesian_cap = 'off' if unlimited_motion else f'{max_linear_speed:g} m/s'
-        print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint slew cap={joint_cap}, "
+        print(f"Motion: {rate_hz:g} Hz, translation scale={scale_factor:g}, "
+              f"rotation scale={rotation_scale:g}, joint slew cap={joint_cap}, "
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
               f"Cartesian cap={cartesian_cap}; mode={motion_mode}; "
               f"gripper={gripper_force:g} N, stroke ramp={gripper_slew_mm_s:g} mm/s "
               f"(full stroke {gripper_max_width * 1000 / gripper_slew_mm_s:.2f} s); "
               f"release TRIGGER once to arm closing.")
+        if rotation_scale != 1.0:
+            # apply_delta_pose cannot represent a turn past 180 deg, so the scaled
+            # rotation saturates instead of wrapping into a swing the other way.
+            print(f"Rotation: hand rotation is multiplied by {rotation_scale:g} on the tool, "
+                  f"saturating at 180 deg of tool rotation, i.e. "
+                  f"{180.0 / rotation_scale:.0f} deg of hand rotation from the clutch pose.")
         print(f"One-Euro: position cutoff={oneeuro_min_cutoff:g}, beta={oneeuro_beta:g}; "
               f"rotation cutoff={oneeuro_rotation_min_cutoff:g}, beta={oneeuro_rotation_beta:g}; "
               f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace={tracking_timeout:g} s.")
@@ -629,7 +644,9 @@ def main(
                               f"drive(previous target)={m['drive_deg']:.2f} deg; "
                               f"tracking={m['track_deg']:.2f} deg; IK={m['ik_ms']:.1f} ms; "
                               f"IK residual={m['ik_residual_mm']:.1f} mm/{m['ik_residual_deg']:.1f} deg; "
-                              f"target={'reached' if m['ik_reached'] else 'not reached (bounds/pose/iteration budget)'}", flush=True)
+                              f"target={'reached' if m['ik_reached'] else 'not reached (bounds/pose/iteration budget)'}"
+                              + ("; ROTATION SATURATED (turn the hand back)"
+                                 if m.get("rot_sat") else ""), flush=True)
                 report_started, report_cycles = tick, 0
                 next_gripper_report = tick + 2.0
             if recording:
