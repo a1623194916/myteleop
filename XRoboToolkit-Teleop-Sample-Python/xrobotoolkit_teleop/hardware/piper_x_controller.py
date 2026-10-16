@@ -4,8 +4,12 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import mujoco
+from meshcat import transformations as tf
 
 from xrobotoolkit_teleop.simulation.mujoco_teleop_controller import MujocoTeleopController
+from xrobotoolkit_teleop.utils.geometry import apply_delta_pose
+from xrobotoolkit_teleop.hardware.piper_x_ik import ContinuousPoseIK
 
 # Share the tested math with the local UR package; retain Piper's base-frame mapping.
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -35,6 +39,35 @@ class PiperTeleopController(MujocoTeleopController):
         self.limiter = CartesianRateLimiter(max_linear_speed, max_angular_speed)
         self.jump_guard = ControllerJumpGuard()
         super().__init__(*args, **kwargs)
+        self.pose_ik = ContinuousPoseIK(self.mj_model)
+        self.last_ik_result = None
+
+    def solve_from_feedback(self, measured, active):
+        """Sample clutch once; solve only a live, engaged hand target."""
+        self.mj_data.qpos[self.pose_ik.qadr] = measured
+        mujoco.mj_forward(self.mj_model, self.mj_data)
+        name, config = next(iter(self.manipulator_config.items()))
+        self.active[name] = bool(active)
+        if not active:
+            if self.ref_ee_xyz[name] is not None:
+                print(f"{name} is deactivated.")
+            self.ref_ee_xyz[name] = self.ref_controller_xyz[name] = None
+            self.pose_ik.previous = None
+            self.last_ik_result = None
+            return np.asarray(measured).copy()
+        if self.ref_ee_xyz[name] is None:
+            print(f"{name} is activated.")
+            self.ref_ee_xyz[name], self.ref_ee_quat[name] = self._get_link_pose(config["link_name"])
+            self.pose_ik.reset(measured)
+        pose = self.xr_client.get_pose_by_name(config["pose_source"])
+        xyz, rotvec = self._process_xr_pose(pose, name)
+        position, quaternion = apply_delta_pose(self.ref_ee_xyz[name], self.ref_ee_quat[name], xyz, rotvec)
+        target = tf.quaternion_matrix(quaternion)
+        target[:3, 3] = position
+        self.effector_task[name].T_world_frame = target
+        self.last_ik_result = self.pose_ik.solve(target, measured)
+        self.mj_data.ctrl[:6] = self.last_ik_result.joints
+        return self.last_ik_result.joints.copy()
 
     def _process_xr_pose(self, pose, name):
         if self.ref_controller_xyz[name] is None:

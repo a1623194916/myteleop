@@ -55,7 +55,9 @@ class CanConfig:
     speed_percent: int = 30
     gripper_max_width: float = 0.10
     gripper_force: float = 5.0
-    motion_mode: str = "js"
+    motion_mode: str = "mit"
+    mit_kp: float = 10.0
+    mit_kd: float = 0.8
 
 
 @dataclass

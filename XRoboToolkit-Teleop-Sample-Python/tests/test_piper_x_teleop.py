@@ -56,6 +56,43 @@ class FakeArm:
 
 
 class PiperXTeleopTests(unittest.TestCase):
+    def test_mit_routes_all_six_joints_and_home_overrides_to_planned_j(self):
+        fake = FakeArm()
+        fake.move_mit = lambda index, **kwargs: fake.commands.append((index, kwargs))
+        arm = PiperXCanArm(driver=fake, motion_mode="mit")
+        try:
+            arm.move_joints(np.arange(6) * 0.01)
+            self.assertEqual(len(fake.commands), 6)
+            for index, (joint, values) in enumerate(fake.commands, 1):
+                self.assertEqual(joint, index)
+                self.assertEqual(values, dict(p_des=(index - 1) * 0.01,
+                                             v_des=0.0, kp=10.0, kd=0.8, t_ff=0.0))
+            arm.move_joints(np.zeros(6), motion_mode="j")
+            self.assertEqual(fake.commands[-1], [0.] * 6)
+            count = len(fake.commands)
+            with self.assertRaises(ValueError):
+                arm.move_joints([0, 0, 0, 0, 0, float("nan")])
+            self.assertEqual(len(fake.commands), count)
+        finally:
+            arm.close()
+
+    def test_missing_mit_support_fails_before_enable(self):
+        fake = FakeArm()
+        fake.enable = lambda: self.fail("unsupported driver enabled motors")
+        with self.assertRaisesRegex(RuntimeError, "lacks move_mit"):
+            PiperXCanArm(driver=fake, motion_mode="mit")
+        self.assertFalse(fake.connected)
+
+    def test_read_only_mit_never_sends(self):
+        fake = FakeArm()
+        fake.move_mit = lambda *args, **kwargs: self.fail("read-only sent servo command")
+        arm = PiperXCanArm(driver=fake, motion_mode="mit", read_only=True)
+        try:
+            with self.assertRaisesRegex(RuntimeError, "Read-only"):
+                arm.move_joints(np.zeros(6))
+        finally:
+            arm.close()
+
     def test_stream_mode_uses_js_and_keeps_read_only_guard(self):
         fake = FakeArm()
         arm = PiperXCanArm(driver=fake, motion_mode="js")

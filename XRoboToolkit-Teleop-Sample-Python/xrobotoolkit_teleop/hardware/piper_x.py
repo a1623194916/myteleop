@@ -81,9 +81,14 @@ class PiperXCanArm:
         driver=None,
         read_only: bool = False,
         motion_mode: str = "j",
+        mit_kp: float = 10.0,
+        mit_kd: float = 0.8,
     ):
-        if motion_mode not in {"j", "js"}:
-            raise ValueError("Piper motion mode must be j or js")
+        if motion_mode not in {"j", "js", "mit"}:
+            raise ValueError("Piper motion mode must be j, js or mit")
+        if not np.isfinite(mit_kp) or not np.isfinite(mit_kd) or not 0 < mit_kp <= 500 or not 0 < mit_kd <= 5:
+            raise ValueError("MIT requires 0 < kp <= 500 and 0 < kd <= 5")
+        self.mit_kp, self.mit_kd = mit_kp, mit_kd
         self.motion_mode = motion_mode
         self.channel = channel
         self.gripper_max_width = gripper_max_width
@@ -115,6 +120,8 @@ class PiperXCanArm:
             driver = AgxArmFactory.create_arm(config(firmware))
         self.driver = driver
         try:
+            if motion_mode == "mit" and not callable(getattr(driver, "move_mit", None)):
+                raise RuntimeError("Selected Piper-X SDK/firmware driver lacks move_mit")
             if not read_only:
                 self.gripper = driver.init_effector(driver.OPTIONS.EFFECTOR.AGX_GRIPPER)
             driver.connect()
@@ -151,11 +158,20 @@ class PiperXCanArm:
     def move_joints(self, joints, motion_mode=None):
         if self.read_only:
             raise RuntimeError("Read-only CAN session")
-        command = [float(q) for q in joints]
+        values = np.asarray(joints, dtype=float)
+        if values.shape != (6,) or not np.all(np.isfinite(values)):
+            raise ValueError("Six finite joints required before sending any motor target")
+        command = values.tolist()
         selected_mode = self.motion_mode if motion_mode is None else motion_mode
-        if selected_mode not in {"j", "js"}:
-            raise ValueError("Piper motion mode must be j or js")
-        if selected_mode == "js":
+        if selected_mode not in {"j", "js", "mit"}:
+            raise ValueError("Piper motion mode must be j, js or mit")
+        if selected_mode == "mit":
+            # Use the model/firmware-specific SDK implementation, including
+            # Piper-X v188 wrist sign corrections. No guessed torque feedforward.
+            for index, position in enumerate(command, 1):
+                self.driver.move_mit(index, p_des=position, v_des=0.0,
+                                     kp=self.mit_kp, kd=self.mit_kd, t_ff=0.0)
+        elif selected_mode == "js":
             self.driver.move_js(command)
         else:
             self.driver.move_j(command)

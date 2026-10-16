@@ -5,7 +5,6 @@ import time
 from pathlib import Path
 from typing import Literal
 
-import mujoco
 import numpy as np
 import tyro
 
@@ -144,15 +143,11 @@ class TeleopArm:
     def solve(self, measured):
         started = time.monotonic()
         previous = self.last_command
-        for index, joint_id in enumerate(self.joint_ids):
-            self.controller.mj_data.qpos[self.model.jnt_qposadr[joint_id]] = measured[index]
-        mujoco.mj_forward(self.model, self.controller.mj_data)
-        self.controller._update_ik()
-        self.controller._send_command()
-        target = self.controller.mj_data.ctrl[:6].copy()
         active = self.xr.get_key_value_by_name(f"{self.side}_grip") > 0.9
+        target = self.controller.solve_from_feedback(measured, active)
         command = self.follower.next(measured, target, active)
         if active:
+            self.controller.pose_ik.previous = command.copy()
             # Compare feedback with the PREVIOUS sent command: the current
             # command cannot have reached hardware when this sample was taken.
             self.follow_metrics = {
@@ -160,6 +155,9 @@ class TeleopArm:
                 "limit_deg": float(np.rad2deg(np.max(np.abs(target - command)))),
                 "drive_deg": float(np.rad2deg(np.max(np.abs(measured - previous)))) if previous is not None else 0.0,
                 "ik_ms": (time.monotonic() - started) * 1000,
+                "ik_residual_mm": self.controller.last_ik_result.position_error_m * 1000,
+                "ik_residual_deg": np.rad2deg(self.controller.last_ik_result.rotation_error_rad),
+                "ik_reached": self.controller.last_ik_result.reached,
             }
         return command, active
 
@@ -169,6 +167,7 @@ class TeleopArm:
         self.controller.ref_controller_xyz[name] = None
         self.follower.last_command = None
         self.follower.error_started = None
+        self.controller.pose_ik.previous = None
 
     def send(self, command, tick, update_gripper=True, home_return=False):
         if command is not None:
@@ -245,7 +244,9 @@ def main(
     speed_percent: int = 100,
     gripper_max_width: float = 0.10,
     gripper_force: float = 5.0,
-    motion_mode: Literal["j", "js"] = "js",
+    motion_mode: Literal["j", "js", "mit"] = "mit",
+    mit_kp: float = 10.0,
+    mit_kd: float = 0.8,
     no_pose_filter: bool = False,
     position_deadband: float = 0.001,
     rotation_deadband_deg: float = 0.3,
@@ -298,6 +299,8 @@ def main(
         raise ValueError("Invalid motion scale, speed percentage or gripper width")
     if not 0 < gripper_force <= 10 or position_deadband < 0 or rotation_deadband_deg < 0:
         raise ValueError("Invalid gripper force (0..10 N) or pose deadband")
+    if not np.isfinite(mit_kp) or not np.isfinite(mit_kd) or not 0 < mit_kp <= 500 or not 0 < mit_kd <= 5:
+        raise ValueError("MIT requires 0 < kp <= 500 and 0 < kd <= 5")
     if max_linear_speed <= 0 or max_angular_speed <= 0:
         raise ValueError("Cartesian speed limits must be positive")
     if oneeuro_min_cutoff <= 0 or oneeuro_beta < 0:
@@ -348,6 +351,9 @@ def main(
                                                   "max_linear_speed_m_s": max_linear_speed,
                                                   "max_angular_speed_rad_s": max_angular_speed,
                                                   "motion_mode": motion_mode,
+                                                  "ik_backend": "continuous_bounded_pose",
+                                                  "mit_kp": mit_kp,
+                                                  "mit_kd": mit_kd,
                                                   "unlimited_motion": unlimited_motion,
                                                   "oneeuro_min_cutoff": oneeuro_min_cutoff,
                                                   "oneeuro_beta": oneeuro_beta,
@@ -373,6 +379,8 @@ def main(
             recording.cfg.control.oneeuro_rotation_min_cutoff = oneeuro_rotation_min_cutoff
             recording.cfg.control.oneeuro_rotation_beta = oneeuro_rotation_beta
             recording.cfg.can.motion_mode = motion_mode
+            recording.cfg.can.mit_kp = mit_kp
+            recording.cfg.can.mit_kd = mit_kd
             recording.cfg.can.channel = next(iter(selected.values()))
             recording.cfg.can.firmware = firmware
             recording.cfg.can.speed_percent = speed_percent
@@ -394,6 +402,7 @@ def main(
                 channel=runtime.channel, firmware=profiles[side], speed_percent=speed_percent,
                 gripper_max_width=gripper_max_width,
                 motion_mode=motion_mode,
+                mit_kp=mit_kp, mit_kd=mit_kd,
             )
             runtime.last_command = runtime.arm.read_joints()
 
@@ -416,6 +425,9 @@ def main(
         print(f"One-Euro: position cutoff={oneeuro_min_cutoff:g}, beta={oneeuro_beta:g}; "
               f"rotation cutoff={oneeuro_rotation_min_cutoff:g}, beta={oneeuro_rotation_beta:g}; "
               f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace=0.5 s.")
+        print("IK: continuous bounded pose solve, previous-command seed, FK residual checks (no Placo step).")
+        if motion_mode == "mit":
+            print(f"Servo: SDK move_mit on J1-J6; kp={mit_kp:g}, kd={mit_kd:g}, velocity/torque feedforward=0.")
         period = 1.0 / rate_hz
         next_gripper_report = time.monotonic() + 2.0
         report_started, report_cycles = time.monotonic(), 0
@@ -486,7 +498,9 @@ def main(
                         print(f"[{side}] follow: TCP={error_mm:.1f} mm; "
                               f"input(filter/rate)={m['input_mm']:.1f} mm; "
                               f"joint-limit={m['limit_deg']:.2f} deg; "
-                              f"drive(previous target)={m['drive_deg']:.2f} deg; IK={m['ik_ms']:.1f} ms", flush=True)
+                              f"drive(previous target)={m['drive_deg']:.2f} deg; IK={m['ik_ms']:.1f} ms; "
+                              f"IK residual={m['ik_residual_mm']:.1f} mm/{m['ik_residual_deg']:.1f} deg; "
+                              f"target={'reached' if m['ik_reached'] else 'not reached (bounds/pose/iteration budget)'}", flush=True)
                 report_started, report_cycles = tick, 0
                 next_gripper_report = tick + 2.0
             if recording:

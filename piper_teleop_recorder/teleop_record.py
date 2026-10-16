@@ -427,6 +427,7 @@ def run_hardware(cfg, enable_hardware=False):
         max_linear_speed=cfg.control.max_linear_speed,
         max_angular_speed=cfg.control.max_angular_speed,
         motion_mode=cfg.can.motion_mode,
+        mit_kp=cfg.can.mit_kp, mit_kd=cfg.can.mit_kd,
         oneeuro_min_cutoff=cfg.control.oneeuro_min_cutoff,
         oneeuro_beta=cfg.control.oneeuro_beta,
         oneeuro_derivative_cutoff=cfg.control.oneeuro_derivative_cutoff,

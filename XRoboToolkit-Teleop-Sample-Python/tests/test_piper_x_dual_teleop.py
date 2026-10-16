@@ -70,6 +70,32 @@ class FakeArm:
 
 
 class DualPiperTest(unittest.TestCase):
+    def test_inactive_never_solves_and_clutch_anchors_at_measured_tcp(self):
+        xr = FakeXR()
+        runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0,
+                                  no_pose_filter=True, position_deadband=0,
+                                  unlimited_motion=True)
+        measured = np.deg2rad([15, 70, -90, 25, 30, -20])
+        with patch.object(runtime.controller.pose_ik, "solve", wraps=runtime.controller.pose_ik.solve) as solve:
+            command, active = runtime.solve(measured)
+            self.assertFalse(active)
+            self.assertIsNone(command)
+            solve.assert_not_called()
+            xr.positions["right"] = 1.2
+            xr.values["right_grip"] = 1.0
+            command, active = runtime.solve(measured)
+            self.assertTrue(active)
+            np.testing.assert_allclose(command, measured, atol=1e-7)
+            self.assertTrue(runtime.controller.last_ik_result.reached)
+            xr.values["right_grip"] = 0.0
+            runtime.solve(measured)
+            self.assertIsNone(runtime.controller.pose_ik.previous)
+            measured += np.deg2rad([2, 2, -2, 2, 2, 2])
+            xr.positions["right"] = -0.6
+            xr.values["right_grip"] = 1.0
+            command, _ = runtime.solve(measured)
+            np.testing.assert_allclose(command, measured, atol=1e-7)
+
     def test_main_tracking_fault_holds_then_allows_reclutch_instead_of_exiting(self):
         xr, frames, solved, sent = FakeXR(), [0], [], []
         xr.get_key_value_by_name = lambda name: float(frames[0] == 0)

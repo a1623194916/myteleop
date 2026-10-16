@@ -56,7 +56,7 @@ bash start_piper_x.sh --mode dual --no-camera --read-only
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-channel can1
+bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-channel can1 --motion-mode mit
 ```
 
 <a id="piper-single-record"></a>
@@ -65,19 +65,21 @@ bash start_piper_x.sh --mode dual --enable-hardware --left-channel can0 --right-
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-bash start_piper_x.sh --mode single --controller-side right --channel can1 --enable-hardware
+bash start_piper_x.sh --mode single --controller-side right --channel can1 --enable-hardware --motion-mode mit
 ```
 
 ### 单臂左臂遥操 + A 键录制
 
 ```bash
 cd /home/u22/kyz/idea/pico_software
-bash start_piper_x.sh --mode single --controller-side left --channel can0 --enable-hardware
+bash start_piper_x.sh --mode single --controller-side left --channel can0 --enable-hardware --motion-mode mit
 ```
 
 默认开启相机采集与录制功能，不向 VR 推视频；需要同时启动 Unity 时添加 `--unity`。程序等待头显连接后才使能。
 
 <a id="piper-no-camera"></a>
+
+### 不开相机遥操
 
 #### 双臂
 

@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "mujoco",
     "numpy",
+    "scipy",
     "meshcat",
     "placo",
     "ur_rtde",
