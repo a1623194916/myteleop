@@ -29,6 +29,25 @@ class JointFollower:
         self.hard_error_rad = hard_error_rad
         self.error_started = None
 
+    def tracking_error(self, measured):
+        """Largest joint deviation from the last accepted command, in radians.
+
+        Returns 0.0 before the first accepted command on a fresh clutch.
+        """
+        if self.last_command is None:
+            return 0.0
+        return float(np.max(np.abs(np.asarray(measured, dtype=float) - self.last_command)))
+
+    def error_within_tolerance(self, measured, limit_rad: float | None = None) -> bool:
+        """True when feedback is back inside the configured tracking tolerance."""
+        limit = self.max_error_rad if limit_rad is None else float(limit_rad)
+        return self.tracking_error(measured) <= limit
+
+    def reanchor(self, measured):
+        """Restart the next command from fresh feedback after a tracking hold."""
+        self.last_command = np.clip(np.asarray(measured, dtype=float), self.lower, self.upper)
+        self.error_started = None
+
     def next(self, measured, target, active: bool):
         """Return a bounded command, or None while the deadman is released."""
         measured = np.asarray(measured, dtype=float)
@@ -203,6 +222,43 @@ class PiperXCanArm:
             value=float(np.clip(opening, 0, 1)) * self.gripper_max_width,
             force=force,
         )
+
+    def read_gripper_width(self, max_age: float = 0.3):
+        """Return (width_m, status_code, mode) or None when feedback is stale."""
+        reading = self.gripper.get_gripper_status() if self.gripper is not None else None
+        if reading is None or time.time() - reading.timestamp > max_age:
+            return None
+        msg = reading.msg
+        return float(msg.value), int(msg.status_code), str(msg.mode)
+
+    def verify_gripper_stroke(self, probe_mm: float = 8.0, settle_s: float = 2.0):
+        """Prove the jaws physically move, then restore the starting width.
+
+        ``open_gripper`` only checks that the width *reads back* as the full
+        stroke. That also passes for an effector whose position feedback is
+        frozen (never zeroed / not homing), which is how a dead gripper can
+        silently make TRIGGER look unmapped. This probe commands a small close
+        and requires the reading to follow it.
+
+        Returns ``(moved, width_before_m, width_after_m)``.
+        """
+        start = self.read_gripper_width()
+        if start is None:
+            return False, None, None
+        width_before = start[0]
+        if self.gripper_max_width <= 0:
+            return False, width_before, None
+        target = max(0.0, width_before - probe_mm / 1000.0)
+        deadline = time.monotonic() + settle_s
+        while time.monotonic() < deadline:
+            self.set_gripper(target / self.gripper_max_width, force=1.0)
+            time.sleep(0.1)
+        end = self.read_gripper_width()
+        width_after = None if end is None else end[0]
+        # Best-effort restore; never verify here, the caller decides what to do.
+        self.set_gripper(width_before / self.gripper_max_width, force=1.0)
+        moved = width_after is not None and abs(width_after - width_before) >= probe_mm * 0.25 / 1000.0
+        return moved, width_before, width_after
 
     def close(self):
         # disable/reset cut power and can drop a raised arm.

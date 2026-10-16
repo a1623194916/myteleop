@@ -75,6 +75,7 @@ def hold_for_rearm(runtimes, homes, recording=None):
     for side, runtime in runtimes.items():
         runtime.release_clutch()
         runtime.rearm_required = True
+        runtime.recovering = False
         homes[side].returning = False
         homes[side].blocked_until_release = True
         homes[side].last_pressed = True
@@ -91,7 +92,7 @@ def pause_for_pico(xr, runtimes, homes, recording=None):
         for runtime in runtimes.values():
             runtime.arm.read_joints()
     wait_for_pico(xr, runtimes, motors_enabled=True, check_feedback=check_feedback)
-    print("PICO resumed: release GRIP and TRIGGER, then GRIP to take over again.", flush=True)
+    print("PICO resumed: release GRIP, then GRIP again to take over.", flush=True)
 
 
 class TeleopArm:
@@ -103,7 +104,8 @@ class TeleopArm:
                  max_linear_speed=0.5, max_angular_speed=1.5,
                  oneeuro_min_cutoff=3.0, oneeuro_beta=40.0, unlimited_motion=False,
                  oneeuro_derivative_cutoff=10.0, oneeuro_rotation_min_cutoff=3.0,
-                 oneeuro_rotation_beta=3.0):
+                 oneeuro_rotation_beta=3.0, servo_slew_deg=None,
+                 tracking_error_deg=20.0, tracking_timeout=0.8):
         from xrobotoolkit_teleop.hardware.piper_x_controller import PiperTeleopController
 
         self.side, self.channel, self.xr = side, channel, xr
@@ -126,10 +128,17 @@ class TeleopArm:
         self.model = self.controller.mj_model
         self.joint_ids = [self.model.joint(name).id for name in JOINTS]
         limits = self.model.jnt_range[self.joint_ids]
+        # The MIT servo is soft (kp=10). An unbounded per-cycle jump to the raw IK
+        # solution makes feedback lag by tens of degrees and immediately trips the
+        # tracking monitor, which used to stop the arm and demand a re-clutch.
+        # Always slew-limit the joint command; home-return keeps its own cap.
+        slew_deg = max_joint_step_deg if servo_slew_deg is None else servo_slew_deg
         self.follower = JointFollower(limits[:, 0], limits[:, 1],
-                                      np.inf if unlimited_motion else np.deg2rad(max_joint_step_deg),
-                                      tracking_timeout=0.5)
+                                      np.deg2rad(slew_deg) if slew_deg > 0 else np.inf,
+                                      max_error_rad=np.deg2rad(tracking_error_deg),
+                                      tracking_timeout=tracking_timeout)
         self.rearm_required = False
+        self.recovering = False
         self.arm = None
         self.last_command = None
         self.last_gripper = None
@@ -138,6 +147,7 @@ class TeleopArm:
         self.gripper_force = gripper_force
         self.gripper_armed = False  # Require a released trigger after initial opening.
         self.last_trigger = 0.0
+        self.last_trigger_at_send = 0.0
         self.follow_metrics = {}
 
     def solve(self, measured):
@@ -154,6 +164,7 @@ class TeleopArm:
                 "input_mm": self.controller.input_position_gap_m * 1000,
                 "limit_deg": float(np.rad2deg(np.max(np.abs(target - command)))),
                 "drive_deg": float(np.rad2deg(np.max(np.abs(measured - previous)))) if previous is not None else 0.0,
+                "track_deg": float(np.rad2deg(self.follower.tracking_error(measured))),
                 "ik_ms": (time.monotonic() - started) * 1000,
                 "ik_residual_mm": self.controller.last_ik_result.position_error_m * 1000,
                 "ik_residual_deg": np.rad2deg(self.controller.last_ik_result.rotation_error_rad),
@@ -197,6 +208,29 @@ class TeleopArm:
             self.arm.set_gripper(opening, force=self.gripper_force)
             self.gripper_command_m = opening * self.arm.gripper_max_width
             self.last_gripper, self.last_gripper_time = opening, tick
+            # Remember which trigger sample produced this width; the live trigger
+            # keeps moving, so reporting it next to a rate-limited width looks
+            # like a broken mapping.
+            self.last_trigger_at_send = trigger
+
+    def hold_or_recover(self, measured):
+        """Freeze the arm during a tracking hold and resume once it catches up.
+
+        Nothing is sent while held, so the MIT servo keeps holding its last
+        target. Re-anchoring on resume avoids replaying the stale target that
+        caused the lag in the first place (no button release needed).
+        """
+        if not self.recovering:
+            return False
+        if self.follower.error_within_tolerance(measured):
+            self.follower.reanchor(measured)
+            self.controller.pose_ik.previous = None
+            self.recovering = False
+            print(f"[{self.side}] tracking recovered "
+                  f"(error {np.rad2deg(self.follower.tracking_error(measured)):.1f} deg); resuming.",
+                  flush=True)
+            return False
+        return True
 
     def recording_state(self, measured, active, dual):
         from piper_teleop_recorder.teleop_record import flange_rpy_to_eef_rpy
@@ -229,9 +263,10 @@ class TeleopArm:
             return
         msg = status.msg
         actual = f"{msg.value * 1000:.1f} mm" if msg.mode == "width" else f"{msg.value:.1f} deg"
-        print(f"[{self.side}] trigger={self.last_trigger:.2f}; "
-              f"gripper target={target:.1f} mm, actual={actual}, "
-              f"enabled={msg.foc_status.driver_enable_status}, status=0x{msg.status_code:02x}", flush=True)
+        print(f"[{self.side}] trigger={self.last_trigger:.2f} (width sent at trigger="
+              f"{self.last_trigger_at_send:.2f}); gripper target={target:.1f} mm, actual={actual}, "
+              f"enabled={msg.foc_status.driver_enable_status}, homed={msg.foc_status.homing_status}, "
+              f"status=0x{msg.status_code:02x}", flush=True)
 
 
 def main(
@@ -270,6 +305,12 @@ def main(
     home_speed_deg_s: float = 15.0,
     home_timeout: float = 30.0,
     unlimited_motion: bool = True,
+    servo_slew_deg: float = 2.0,
+    tracking_error_deg: float = 20.0,
+    tracking_timeout: float = 0.8,
+    strict_rearm: bool = False,
+    skip_gripper_check: bool = False,
+    allow_gripper_fault: bool = False,
 ) -> None:
     """Independent GRIP/TRIGGER; A records; B returns right, Y returns left; Ctrl+C exits."""
     selected = select_arms(mode, controller_side, channel, left_channel, right_channel)
@@ -309,6 +350,10 @@ def main(
         raise ValueError("Invalid One-Euro derivative/rotation parameters")
     if not 0 < home_speed_deg_s <= 30 or not 0 < home_timeout <= 120:
         raise ValueError("Use 0 < home-speed-deg-s <= 30 and 0 < home-timeout <= 120")
+    if not 0 < servo_slew_deg <= 15:
+        raise ValueError("Use 0 < servo-slew-deg <= 15 (per cycle joint command slew)")
+    if not 5 <= tracking_error_deg <= 60 or not 0.1 <= tracking_timeout <= 5:
+        raise ValueError("Use 5 <= tracking-error-deg <= 60 and 0.1 <= tracking-timeout <= 5")
     home_targets = load_home_targets(home_config, selected)
 
     from xrobotoolkit_teleop.common.xr_client import XrClient
@@ -329,6 +374,9 @@ def main(
                 oneeuro_derivative_cutoff=oneeuro_derivative_cutoff,
                 oneeuro_rotation_min_cutoff=oneeuro_rotation_min_cutoff,
                 oneeuro_rotation_beta=oneeuro_rotation_beta,
+                servo_slew_deg=(max_joint_step_deg if not unlimited_motion else servo_slew_deg),
+                tracking_error_deg=tracking_error_deg,
+                tracking_timeout=tracking_timeout,
             )
         homes = {}
         for side, runtime in runtimes.items():
@@ -364,6 +412,9 @@ def main(
                                                   "home_joint_rad": {side: home.target.tolist() for side, home in homes.items()},
                                                   "home_speed_deg_s": home_speed_deg_s,
                                                   "home_motion_mode": "j",
+                                                  "servo_slew_deg": max_joint_step_deg if not unlimited_motion else servo_slew_deg,
+                                                  "tracking_error_deg": tracking_error_deg,
+                                                  "tracking_timeout_s": tracking_timeout,
                                               })
             recording.cfg.control.rate_hz = rate_hz
             recording.cfg.control.max_joint_step_deg = max_joint_step_deg
@@ -407,24 +458,54 @@ def main(
             runtime.last_command = runtime.arm.read_joints()
 
         for runtime in runtimes.values():
-            runtime.arm.open_gripper(force=gripper_force)
+            try:
+                runtime.arm.open_gripper(force=gripper_force)
+            except RuntimeError as exc:
+                # A non-responding effector must not block arm teleoperation:
+                # the arm fix has to be verifiable while the gripper is broken.
+                if not allow_gripper_fault:
+                    raise
+                print(f"[{runtime.side}] WARNING: {exc} -- continuing with "
+                      f"--allow-gripper-fault; TRIGGER will have no effect.", flush=True)
             runtime.last_gripper = 1.0
             runtime.gripper_command_m = runtime.arm.gripper_max_width
             runtime.last_gripper_time = time.monotonic()
+        # `open_gripper` only proves the width READS as the full stroke, which is
+        # also true for an effector whose feedback is frozen (not homed). Probe a
+        # small close so a dead gripper cannot silently make TRIGGER look unmapped.
+        if not skip_gripper_check:
+            for runtime in runtimes.values():
+                moved, before, after = runtime.arm.verify_gripper_stroke()
+                if moved:
+                    print(f"[{runtime.side}] gripper stroke check OK: "
+                          f"{before * 1000:.1f} -> {after * 1000:.1f} mm", flush=True)
+                else:
+                    shown = "no feedback" if after is None else f"{after * 1000:.1f} mm"
+                    print(f"[{runtime.side}] GRIPPER NOT RESPONDING: commanded a small close but the "
+                          f"width stayed at {before * 1000:.1f} -> {shown}. TRIGGER will look "
+                          f"unmapped until this is fixed. Run "
+                          f"'PYTHONPATH=. .venv/bin/python scripts/hardware/piper_x_gripper_tool.py "
+                          f"--channel {runtime.channel} read' for the gripper state.",
+                          flush=True)
         # Opening may take seconds. Recheck live XR after it before any joint command.
         wait_for_pico(xr, selected, pico_wait_timeout, motors_enabled=True)
 
         timestamp, packet_time = xr.get_timestamp_ns(), time.monotonic()
         print("Piper-X enabled: GRIP takes over, TRIGGER controls gripper; B returns right, Y returns left; Ctrl+C exits.")
-        joint_cap = 'off' if unlimited_motion else f'{rate_hz * max_joint_step_deg:g} deg/s'
+        joint_slew = max_joint_step_deg if not unlimited_motion else servo_slew_deg
+        joint_cap = (f'{rate_hz * joint_slew:g} deg/s ({joint_slew:g} deg/cycle)'
+                     if joint_slew > 0 else 'off')
         cartesian_cap = 'off' if unlimited_motion else f'{max_linear_speed:g} m/s'
-        print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint cap={joint_cap}, "
+        print(f"Motion: {rate_hz:g} Hz, scale={scale_factor:g}, joint slew cap={joint_cap}, "
               f"driver speed={speed_percent}%; One-Euro={'off' if no_pose_filter else 'on'}, "
               f"Cartesian cap={cartesian_cap}; mode={motion_mode}; "
               f"gripper={gripper_force:g} N (release TRIGGER once to arm closing).")
         print(f"One-Euro: position cutoff={oneeuro_min_cutoff:g}, beta={oneeuro_beta:g}; "
               f"rotation cutoff={oneeuro_rotation_min_cutoff:g}, beta={oneeuro_rotation_beta:g}; "
-              f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace=0.5 s.")
+              f"derivative cutoff={oneeuro_derivative_cutoff:g}; tracking grace={tracking_timeout:g} s.")
+        print(f"Tracking guard: fault above {tracking_error_deg:g} deg for {tracking_timeout:g} s; "
+              + ("hold and auto-resume (release GRIP to re-clutch manually)."
+                 if not strict_rearm else "stop and require a fresh GRIP re-clutch."))
         print("IK: continuous bounded pose solve, previous-command seed, FK residual checks (no Placo step).")
         if motion_mode == "mit":
             print(f"Servo: SDK move_mit on J1-J6; kp={mit_kp:g}, kd={mit_kd:g}, velocity/torque feedforward=0.")
@@ -459,12 +540,19 @@ def main(
             try:
                 for side, runtime in runtimes.items():
                     if getattr(runtime, "rearm_required", False):
-                        if (xr.get_key_value_by_name(f"{side}_grip") > 0.9
-                                or xr.get_key_value_by_name(f"{side}_trigger") > 0.05):
-                            home_handled[side] = True
+                        # GRIP is the clutch; TRIGGER only drives the gripper, so
+                        # holding it must not block re-arming the arm.
+                        if xr.get_key_value_by_name(f"{side}_grip") > 0.9:
+                            home_handled[side] = False
                             solutions[side] = (None, False)
                             continue
                         runtime.rearm_required = False
+                    hold_or_recover = getattr(runtime, "hold_or_recover", None)
+                    if hold_or_recover is not None and hold_or_recover(measured[side]):
+                        # Wait for the arm to catch up; keep the gripper live.
+                        home_handled[side] = False
+                        solutions[side] = (None, False)
+                        continue
                     command, handled = homes[side].step(
                         measured[side], xr.get_button_state_by_name("B" if side == "right" else "Y"),
                         xr.get_key_value_by_name(f"{side}_grip") > 0.9, tick,
@@ -474,9 +562,18 @@ def main(
                         runtime.release_clutch()
                         solutions[side] = (command, False)
                     else:
-                        solutions[side] = runtime.solve(measured[side])
+                        try:
+                            solutions[side] = runtime.solve(measured[side])
+                        except JointTrackingError as exc:
+                            if strict_rearm:
+                                raise
+                            runtime.recovering = True
+                            print(f"[tracking hold] {exc}; holding the last target and "
+                                  f"auto-resuming when the arm catches up "
+                                  f"(no button release needed).", flush=True)
+                            solutions[side] = (None, False)
             except JointTrackingError as exc:
-                print(f"[tracking hold] {exc}; release GRIP/TRIGGER, then re-clutch to retry.", flush=True)
+                print(f"[tracking hold] {exc}; release GRIP, then re-clutch to retry.", flush=True)
                 hold_for_rearm(runtimes, homes, recording)
                 continue
             for side, runtime in runtimes.items():
@@ -498,7 +595,8 @@ def main(
                         print(f"[{side}] follow: TCP={error_mm:.1f} mm; "
                               f"input(filter/rate)={m['input_mm']:.1f} mm; "
                               f"joint-limit={m['limit_deg']:.2f} deg; "
-                              f"drive(previous target)={m['drive_deg']:.2f} deg; IK={m['ik_ms']:.1f} ms; "
+                              f"drive(previous target)={m['drive_deg']:.2f} deg; "
+                              f"tracking={m['track_deg']:.2f} deg; IK={m['ik_ms']:.1f} ms; "
                               f"IK residual={m['ik_residual_mm']:.1f} mm/{m['ik_residual_deg']:.1f} deg; "
                               f"target={'reached' if m['ik_reached'] else 'not reached (bounds/pose/iteration budget)'}", flush=True)
                 report_started, report_cycles = tick, 0

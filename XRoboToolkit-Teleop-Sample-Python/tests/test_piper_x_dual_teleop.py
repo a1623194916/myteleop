@@ -57,6 +57,10 @@ class FakeArm:
         self.grippers.append(opening)
         self.gripper_force = force
 
+    def verify_gripper_stroke(self, probe_mm=8.0, settle_s=2.0):
+        self.stroke_probe = (probe_mm, settle_s)
+        return True, self.gripper_max_width, self.gripper_max_width - probe_mm / 1000.0
+
     def open_gripper(self, force=5.0):
         pass
 
@@ -125,11 +129,16 @@ class DualPiperTest(unittest.TestCase):
                 entry.main(enable_hardware=True)
         self.assertEqual(solved, [0, 1])
         self.assertIsNone(sent[0][1])
-        self.assertFalse(sent[0][2]["update_gripper"])
+        # A tracking hold now freezes the arm but keeps TRIGGER live, so the
+        # gripper does not appear dead while the operator waits for the arm.
+        self.assertTrue(sent[0][2]["update_gripper"])
         self.assertIsNotNone(sent[1][1])
         self.assertTrue(xr.closed)
 
-    def test_unlimited_motion_bypasses_joint_and_cartesian_speed_caps(self):
+    def test_unlimited_motion_bypasses_cartesian_caps_but_joint_slew_always_applies(self):
+        # Cartesian speed caps stay off, but the joint command is still slewed:
+        # a raw jump to the IK solution makes the soft MIT servo lag far enough
+        # to trip the tracking guard, which used to stop the arm mid-teleop.
         xr = FakeXR()
         runtime = entry.TeleopArm("right", "can1", xr, *build_scene(), 1.0,
                                   no_pose_filter=True, position_deadband=0, unlimited_motion=True)
@@ -138,12 +147,18 @@ class DualPiperTest(unittest.TestCase):
         xr.positions["right"] = 0.08
         xyz, _ = controller._process_xr_pose(xr.get_pose_by_name("right_controller"), "right_hand")
         self.assertAlmostEqual(np.linalg.norm(xyz), 0.08)
+        self.assertTrue(np.isfinite(runtime.follower.max_step_rad))
         measured = np.asarray(HOME).copy()
         target = np.clip(measured + 0.1, runtime.follower.lower, runtime.follower.upper)
-        np.testing.assert_allclose(runtime.follower.next(measured, target, True), target)
-        self.assertGreater(np.max(abs(target-measured)), np.deg2rad(1.2))
-        with self.assertRaisesRegex(RuntimeError, "tracking"):
-            runtime.follower.next(measured, np.clip(measured + 0.8, runtime.follower.lower, runtime.follower.upper), True)
+        command = runtime.follower.next(measured, target, True)
+        np.testing.assert_allclose(command, measured + runtime.follower.max_step_rad)
+        self.assertGreater(np.max(abs(target - measured)), runtime.follower.max_step_rad)
+        # A wild IK solution is slewed into a feasible step instead of being
+        # handed straight to the soft MIT servo.
+        wild = np.clip(measured + 0.8, runtime.follower.lower, runtime.follower.upper)
+        stepped = runtime.follower.next(measured, wild, True)
+        self.assertLessEqual(np.max(np.abs(stepped - command)),
+                             runtime.follower.max_step_rad + 1e-9)
 
     def test_send_pause_cancels_homes_checks_feedback_and_keeps_can_connected(self):
         from unittest.mock import Mock
@@ -200,7 +215,9 @@ class DualPiperTest(unittest.TestCase):
         self.assertEqual(solved, [0, 1, 4])
         held = next(item for item in sent if item[0] == 3)
         self.assertIsNone(held[1])
-        self.assertFalse(held[2]["update_gripper"])
+        # Only GRIP is the clutch: the arm is held, TRIGGER still drives the
+        # gripper so a fresh re-clutch is not the only thing the operator can do.
+        self.assertTrue(held[2]["update_gripper"])
         self.assertTrue(xr.closed)
 
     def test_default_closed_loop_step_has_less_software_lag_than_old_settings(self):
